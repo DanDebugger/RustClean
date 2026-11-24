@@ -187,6 +187,15 @@ Guards:
 | Whole-category selection impossible below 960 px | Only the wide category list had checkboxes; chips only filter | **Select shown** works on any filter, at every width |
 | Long app names overlapped sizes in the category list | Label laid out before the right-aligned value | Value laid out first; the label truncates, with the full name on hover |
 | "1 files" in the confirmation summary | No pluralisation | Fixed |
+| Wide layout: detail panel taller than the window **covered the Clean button** | Panel height unbounded | Header (name, safety, recommendation, actions) pinned; the rest scrolls within the column height |
+| Medium/narrow: detail panel pushed the **file list off screen** | Stacked layout gave the list only the leftover height | Panel capped at 240 px; the whole page scrolls; the list has a fixed height (70 % of the window) |
+| Confirmation rows overlapped on phones | Right-aligned size/safety laid out after the name and path | Two lines: name · size · safety (right side laid out first), then app · folder |
+| Category ticks unreadable | Drawn as disabled checkboxes | Coloured icons: ☑ selected, ⊟ partly, ☐ none, 🔒 not removable |
+| Unknown apps shown as raw ids (`us.zoom.updater`) | No display name without an installed app | Readable fallback ("Zoom"); raw folder still shown as Source |
+| Unrelated cache marked "app running" (e.g. `com.example.Notes` while Apple Notes runs) | The guessed display name was used for running-app matching | Only the folder name and, for installed apps, the real name and bundle id are matched; regression test added |
+| "1 files belong…" in the running-apps banner | No pluralisation | Fixed |
+
+**Icons.** Safety tags and filter chips carry icons (🛡 Safe, 👁 Review, 🔒 Protected, ? Unknown, ✨ Recommended), recommended files show ✨ in the list, and the main actions have icons (Scan / Rescan, Clean, Select all safe, Clear, Select recommended, Show only these, Select/Unselect shown).
 
 ## 10. Failure modes
 

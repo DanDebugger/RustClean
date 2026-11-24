@@ -86,8 +86,24 @@ pub fn class_tone(class: SafetyClass) -> Tone {
     }
 }
 
+/// Icon shown with each safety class, so classes are told apart without
+/// relying on colour alone.
+pub fn class_icon(class: SafetyClass) -> &'static str {
+    use egui_phosphor::regular as i;
+    match class {
+        SafetyClass::Safe => i::SHIELD_CHECK,
+        SafetyClass::Review => i::EYE,
+        SafetyClass::Unknown => i::QUESTION,
+        SafetyClass::Protected => i::LOCK,
+    }
+}
+
 pub fn class_pill(ui: &mut Ui, class: SafetyClass) -> Response {
-    pill(ui, class.label(), class_tone(class))
+    pill(
+        ui,
+        format!("{}  {}", class_icon(class), class.label()),
+        class_tone(class),
+    )
 }
 
 /// An inline warning banner.
@@ -253,17 +269,27 @@ pub fn list_row(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                match check {
-                    Some(Some(state)) => {
-                        let mut v = state == Some(true);
-                        let cb = egui::Checkbox::new(&mut v, "").indeterminate(state.is_none());
-                        ui.add_enabled(false, cb)
-                            .on_disabled_hover_text("Click to select this category");
+                // Drawn as icons (not disabled checkboxes) so the state is
+                // easy to read: the row itself handles the click.
+                use egui_phosphor::regular as i;
+                let mark = match check {
+                    Some(Some(Some(true))) => {
+                        Some((i::CHECK_SQUARE, p.accent, "Selected; click to clear"))
                     }
-                    Some(None) => {
-                        ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
+                    Some(Some(None)) => Some((
+                        i::MINUS_SQUARE,
+                        p.accent,
+                        "Partly selected; click to select all",
+                    )),
+                    Some(Some(Some(false))) => {
+                        Some((i::SQUARE, p.muted, "Click to select this category"))
                     }
-                    None => {}
+                    Some(None) => Some((i::LOCK_SIMPLE, p.muted, "Nothing here can be removed")),
+                    None => None,
+                };
+                if let Some((icon, color, tip)) = mark {
+                    ui.label(RichText::new(icon).size(17.0).color(color))
+                        .on_hover_text(tip);
                 }
                 // Value first (right-aligned), so a long label truncates
                 // into the remaining space instead of overlapping it.
@@ -382,12 +408,36 @@ pub fn short_path(path: &std::path::Path, home: &std::path::Path) -> String {
     }
 }
 
+/// A file name, prefixed with the recommendation sparkle when
+/// `recommended`. One text run, so it is no taller than a plain label.
+pub fn file_name_label(ui: &mut Ui, name: &str, recommended: bool) -> Response {
+    let p = palette(ui);
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    if recommended {
+        job.append(
+            &format!("{}  ", egui_phosphor::regular::SPARKLE),
+            0.0,
+            egui::TextFormat::simple(font.clone(), p.safe.0),
+        );
+    }
+    job.append(name, 0.0, egui::TextFormat::simple(font, p.text));
+    job.wrap = egui::text::TextWrapping::truncate_at_width(ui.available_width());
+    let resp = ui.add(egui::Label::new(job).truncate());
+    if recommended {
+        resp.on_hover_text("Recommended: safe to delete")
+    } else {
+        resp
+    }
+}
+
 /// One file as a stacked card row (narrow layout).
 pub fn file_card(
     ui: &mut Ui,
     selected: &mut bool,
     c: &rustclean_core::Candidate,
     active: bool,
+    recommended: bool,
     height: f32,
     home: &std::path::Path,
 ) -> Response {
@@ -406,12 +456,7 @@ pub fn file_card(
                     ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
                 }
                 ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::Label::new(RichText::new(c.file_name()).color(p.text).strong())
-                                .truncate(),
-                        );
-                    });
+                    file_name_label(ui, &c.file_name(), recommended);
                     ui.add(
                         egui::Label::new(
                             RichText::new(short_path(&c.path, home))
@@ -522,8 +567,11 @@ pub fn action_bar(ui: &mut Ui, summary: &str, right: impl FnOnce(&mut Ui)) -> (b
             let mut right = Some(right);
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new(summary).strong().color(egui::Color32::WHITE));
-                select_safe = link(ui, "Select all safe");
-                clear = link(ui, "Clear");
+                select_safe = link(
+                    ui,
+                    &format!("{}  Select all safe", egui_phosphor::regular::CHECKS),
+                );
+                clear = link(ui, &format!("{}  Clear", egui_phosphor::regular::X));
                 if !narrow && let Some(r) = right.take() {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), r);
                 }

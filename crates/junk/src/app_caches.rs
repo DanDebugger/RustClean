@@ -143,7 +143,40 @@ impl AppIndex {
         if let Some((name, id)) = self.by_name.get(base) {
             return (name.clone(), id.clone());
         }
-        (key.to_string(), None)
+        (pretty_name(key, base.len()), None)
+    }
+}
+
+/// Bundle-id parts that say nothing about which app it is.
+const GENERIC_PARTS: &[&str] = &[
+    "mac", "macos", "osx", "app", "desktop", "helper", "client", "agent", "shipit", "updater",
+];
+
+/// Readable name for an app that is not installed (or not found):
+/// `us.zoom.updater` → "Zoom", `com.postmanlabs.mac` → "Postmanlabs".
+/// Other names are kept as they are. `base_len` is the length of `key`
+/// without its updater suffix.
+fn pretty_name(key: &str, base_len: usize) -> String {
+    let base = &key[..base_len.min(key.len())];
+    if !is_reverse_dns(base) {
+        return key.to_string();
+    }
+    let part = base
+        .split('.')
+        .skip(1)
+        .filter(|p| !p.is_empty() && !GENERIC_PARTS.contains(&p.to_lowercase().as_str()))
+        .last();
+    match part {
+        Some(p) => {
+            let mut c = p.chars();
+            match c.next() {
+                Some(f) if p.chars().all(|ch| !ch.is_uppercase()) => {
+                    f.to_uppercase().chain(c).collect()
+                }
+                _ => p.to_string(),
+            }
+        }
+        None => key.to_string(),
     }
 }
 
@@ -238,8 +271,15 @@ impl AppCachesModule {
         if let Some(r) = reason {
             target = target.with_reason(r);
         }
-        let mut owner_keys = vec![key.to_string(), app.clone()];
-        owner_keys.extend(bundle_id);
+        // Only facts are used to detect a running owner: the folder name and,
+        // when the app was found installed, its name and bundle id. A guessed
+        // display name ("Notes" from com.example.Notes) must not match an
+        // unrelated running app (Apple Notes).
+        let mut owner_keys = vec![key.to_string()];
+        if let Some(id) = bundle_id {
+            owner_keys.push(app.clone());
+            owner_keys.push(id);
+        }
         Found {
             app,
             owner_keys,
@@ -450,8 +490,13 @@ mod tests {
             idx.resolve("Slack").1.as_deref(),
             Some("com.tinyspeck.slackmacgap")
         );
-        // Unknown owner keeps its folder name; a partial id is not a match.
-        assert_eq!(idx.resolve("com.micro"), ("com.micro".to_string(), None));
+        // Unknown owners get a readable name; a partial id is not a match.
+        assert_eq!(idx.resolve("com.micro"), ("Micro".to_string(), None));
+        assert_eq!(idx.resolve("us.zoom.updater").0, "Zoom");
+        assert_eq!(idx.resolve("com.postmanlabs.mac").0, "Postmanlabs");
+        assert_eq!(idx.resolve("com.example.NotesApp").0, "NotesApp");
+        assert_eq!(idx.resolve("JNA").0, "JNA");
+        assert_eq!(idx.resolve("GoogleUpdater").0, "GoogleUpdater");
     }
 
     #[test]
@@ -558,7 +603,7 @@ mod macos_tests {
             ),
             ("Slack/Cache/Cache_Data/f_0001", "Slack", SafetyClass::Safe),
             ("Slack/GPUCache/data_0", "Slack", SafetyClass::Safe),
-            ("Caches/thumb.db", "com.example.Notes", SafetyClass::Safe),
+            ("Caches/thumb.db", "Notes", SafetyClass::Safe),
             ("JNA/lib", "JNA", SafetyClass::Review),
         ] {
             let c = find(&r, suffix).unwrap_or_else(|| panic!("{suffix} missing"));
@@ -597,6 +642,12 @@ mod macos_tests {
             assert_eq!(c.class, SafetyClass::Review, "{suffix}");
             assert!(c.reason.as_deref().unwrap().contains("running"));
         }
+        assert_eq!(
+            find(&r, "Caches/thumb.db").unwrap().class,
+            SafetyClass::Safe
+        ); // Regression: the guessed name "Notes" must not match a running
+        // "Notes" process (Apple Notes).
+        let r = scan(&home, RunningApps::from_parts(&[], &["notes"]));
         assert_eq!(
             find(&r, "Caches/thumb.db").unwrap().class,
             SafetyClass::Safe

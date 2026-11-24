@@ -24,7 +24,9 @@ use crate::widgets::{self, Tone};
 
 const TOAST_FOR: Duration = Duration::from_secs(6);
 /// Width of the detail panel in wide/medium layouts.
-const DETAIL_W: f32 = 270.0;
+const DETAIL_W: f32 = 290.0;
+/// Height limit of the detail panel when it sits above the file list.
+const DETAIL_STACKED_H: f32 = 240.0;
 
 /// Layout by available content width.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,6 +77,16 @@ impl ClassFilter {
             ClassFilter::Safe => "Safe",
             ClassFilter::Review => "Review",
             ClassFilter::Locked => "Not removable",
+        }
+    }
+    fn icon(self) -> &'static str {
+        use egui_phosphor::regular as i;
+        match self {
+            ClassFilter::All => i::LIST_BULLETS,
+            ClassFilter::Recommended => i::SPARKLE,
+            ClassFilter::Safe => i::SHIELD_CHECK,
+            ClassFilter::Review => i::EYE,
+            ClassFilter::Locked => i::LOCK,
         }
     }
 }
@@ -581,14 +593,17 @@ impl ScanPage {
                             .color(fg),
                     );
                     if ui
-                        .add_enabled(!all_selected, Button::new("Select recommended"))
+                        .add_enabled(!all_selected, Button::new(format!(
+                            "{}  Select recommended",
+                            egui_phosphor::regular::CHECK_SQUARE
+                        )))
                         .on_hover_text("Adds these files to your selection; you still confirm before anything moves")
                         .clicked()
                     {
                         select = true;
                     }
                     if self.class_filter != ClassFilter::Recommended
-                        && ui.button("Show only these").clicked()
+                        && ui.button(format!("{}  Show only these", egui_phosphor::regular::FUNNEL)).clicked()
                     {
                         show = true;
                     }
@@ -661,6 +676,22 @@ impl ScanPage {
         }
 
         self.header_ui(ui, &ctx, layout);
+        if layout == Breakpoint::Wide {
+            self.body_ui(ui, layout);
+        } else {
+            ScrollArea::vertical()
+                .id_salt((self.id, "page"))
+                .auto_shrink([false, false])
+                .show(ui, |ui| self.body_ui(ui, layout));
+        }
+
+        self.confirm_dialog(&ctx);
+        self.result_dialog(&ctx);
+        self.toast_ui(&ctx);
+    }
+
+    /// Warnings, recommendation and results (everything below the header).
+    fn body_ui(&mut self, ui: &mut Ui, layout: Breakpoint) {
         if let Some(e) = &self.error {
             widgets::error(ui, e);
         }
@@ -677,7 +708,13 @@ impl ScanPage {
                 widgets::banner(
                     ui,
                     &format!(
-                        "{running} files belong to apps that are running, so they are marked Review. Quit those apps and rescan to clean them safely."
+                        "{running} {} to apps that are running, so {} marked Review. Quit those apps and rescan to clean them safely.",
+                        if running == 1 {
+                            "file belongs"
+                        } else {
+                            "files belong"
+                        },
+                        if running == 1 { "it is" } else { "they are" }
                     ),
                     Tone::Review,
                 );
@@ -710,34 +747,34 @@ impl ScanPage {
                         ui.allocate_ui_with_layout(
                             egui::vec2(DETAIL_W, h),
                             egui::Layout::top_down(egui::Align::Min),
-                            |ui| self.detail_card(ui),
+                            |ui| self.detail_card(ui, h),
                         );
                     });
                 }
-                Breakpoint::Medium => {
-                    // The table needs its full width here; details go above.
+                Breakpoint::Medium | Breakpoint::Narrow => {
+                    // Stacked: the page scrolls (see `ui`), and the file list
+                    // gets a fixed share of the window instead of whatever is
+                    // left below the banners and details.
                     self.category_chips(ui);
                     self.filter_row(ui);
                     if self.detail.is_some() {
-                        self.detail_card(ui);
+                        self.detail_card(ui, DETAIL_STACKED_H);
                         ui.add_space(6.0);
                     }
-                    self.table(ui, false);
-                }
-                Breakpoint::Narrow => {
-                    self.category_chips(ui);
-                    self.filter_row(ui);
-                    if self.detail.is_some() {
-                        self.detail_card(ui);
-                    }
-                    self.table(ui, true);
+                    let h = (ui.ctx().content_rect().height() * 0.7).max(320.0);
+                    let w = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(w, h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_height(h);
+                            ui.set_max_height(h);
+                            self.table(ui, layout == Breakpoint::Narrow);
+                        },
+                    );
                 }
             }
         }
-
-        self.confirm_dialog(&ctx);
-        self.result_dialog(&ctx);
-        self.toast_ui(&ctx);
     }
 
     fn header_ui(&mut self, ui: &mut Ui, ctx: &egui::Context, layout: Breakpoint) {
@@ -765,12 +802,15 @@ impl ScanPage {
                 ui.spinner();
             } else {
                 let label = if self.report.is_some() {
-                    "Rescan"
+                    format!("{}  Rescan", egui_phosphor::regular::ARROW_CLOCKWISE)
                 } else {
-                    "Scan now"
+                    format!("{}  Scan now", egui_phosphor::regular::MAGNIFYING_GLASS)
                 };
                 if ui
-                    .add_enabled(self.module.is_available(), theme::primary_button(ui, label))
+                    .add_enabled(
+                        self.module.is_available(),
+                        theme::primary_button(ui, &label),
+                    )
                     .clicked()
                 {
                     self.start_scan(ctx);
@@ -966,7 +1006,11 @@ impl ScanPage {
                 if n == 0 && f != ClassFilter::All {
                     continue;
                 }
-                if widgets::chip(ui, self.class_filter == f, &format!("{} {n}", f.label()))
+                if widgets::chip(
+                    ui,
+                    self.class_filter == f,
+                    &format!("{}  {} {n}", f.icon(), f.label()),
+                )
                     .clicked()
                 {
                     self.class_filter = f;
@@ -999,7 +1043,7 @@ impl ScanPage {
             }
             if selected_shown > 0
                 && ui
-                    .add(Button::new("Unselect shown").small())
+                    .add(Button::new(format!("{}  Unselect shown", egui_phosphor::regular::SQUARE)).small())
                     .clicked()
             {
                 select_shown = Some(false);
@@ -1026,6 +1070,8 @@ impl ScanPage {
             return;
         }
         let selected = &mut self.selected;
+        let recommended = &self.recommended;
+        let is_rec = |i: usize| recommended.get(i).copied().unwrap_or(false);
         let visible = &self.visible;
         let detail = self.detail;
         let home = self.home.as_path();
@@ -1049,6 +1095,7 @@ impl ScanPage {
                                     &mut selected[idx],
                                     c,
                                     detail == Some(idx),
+                                    is_rec(idx),
                                     row_h,
                                     home,
                                 );
@@ -1093,7 +1140,11 @@ impl ScanPage {
                                     });
                                     row.col(|ui| {
                                         ui.vertical(|ui| {
-                                            ui.label(RichText::new(c.file_name()).color(p.text));
+                                            widgets::file_name_label(
+                                                ui,
+                                                &c.file_name(),
+                                                is_rec(idx),
+                                            );
                                             ui.label(
                                                 RichText::new(widgets::short_path(&c.path, home))
                                                     .small()
@@ -1126,7 +1177,12 @@ impl ScanPage {
     }
 
     /// Details of the clicked file, including *why* it has its class.
-    fn detail_card(&mut self, ui: &mut Ui) {
+    ///
+    /// `max_h` bounds the card: the header (name, safety, recommendation and
+    /// actions) is always visible and the rest scrolls, so the card can never
+    /// push the file list off screen or cover the action bar.
+    fn detail_card(&mut self, ui: &mut Ui, max_h: f32) {
+        use egui_phosphor::regular as icon;
         let p = palette(ui);
         let Some(report) = &self.report else { return };
         let c = self.detail.and_then(|i| report.candidates.get(i));
@@ -1140,177 +1196,209 @@ impl ScanPage {
             .as_ref()
             .filter(|l| c.is_some_and(|c| c.path == l.path));
         let method = self.method;
+        let id = self.id;
+        let home = self.home.as_path();
         let mut close = false;
         let mut refresh = false;
-        theme::card(ui).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let Some(c) = c else {
-                ui.label(RichText::new("Details").strong().size(15.0));
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(
-                            "Select a file to see where it is and why it has its safety label.",
+        theme::card(ui)
+            .inner_margin(egui::Margin::same(14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let Some(c) = c else {
+                    ui.label(
+                        RichText::new(format!("{}  Details", icon::INFO))
+                            .strong()
+                            .size(15.0),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Click a file to see what it is, where it lives and whether it is safe to delete.",
+                            )
+                            .color(p.muted),
                         )
-                        .color(p.muted),
-                    )
-                    .wrap(),
-                );
-                return;
-            };
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Label::new(RichText::new(c.file_name()).strong().size(15.0)).truncate(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        .wrap(),
+                    );
+                    return;
+                };
+                let top = ui.cursor().top();
+
+                // Header: name + close, then safety and actions.
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(icon::FILE)
+                            .size(16.0)
+                            .color(p.text2),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button(icon::X)
+                            .on_hover_text("Close details")
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add(
+                                egui::Label::new(RichText::new(c.file_name()).strong().size(15.0))
+                                    .truncate(),
+                            )
+                            .on_hover_text(c.path.display().to_string());
+                        });
+                    });
+                });
+                let rec = rustclean_core::recommend(c, SystemTime::now());
+                ui.horizontal_wrapped(|ui| {
+                    widgets::class_pill(ui, c.class);
+                    if rec.is_recommended() {
+                        widgets::pill(
+                            ui,
+                            format!("{}  Recommended", icon::SPARKLE),
+                            Tone::Safe,
+                        )
+                        .on_hover_text(rec.reason());
+                    }
+                    ui.label(RichText::new(format_bytes(c.disk_usage)).strong());
+                });
+                ui.horizontal_wrapped(|ui| {
                     if ui
-                        .small_button(egui_phosphor::regular::X)
-                        .on_hover_text("Close")
+                        .small_button(format!("{}  {}", icon::FOLDER_OPEN, widgets::reveal_label()))
                         .clicked()
                     {
-                        close = true;
+                        widgets::reveal_in_file_manager(&c.path);
                     }
-                    widgets::class_pill(ui, c.class);
+                    if ui
+                        .small_button(format!("{}  Copy path", icon::COPY))
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(c.path.display().to_string());
+                    }
+                    if ui
+                        .small_button(icon::ARROW_CLOCKWISE)
+                        .on_hover_text("Check the file again")
+                        .clicked()
+                    {
+                        refresh = true;
+                    }
                 });
-            });
-            ui.add_space(4.0);
-            egui::Grid::new((self.id, "detail"))
-                .num_columns(2)
-                .spacing([10.0, 5.0])
-                .show(ui, |ui| {
-                    let row = |ui: &mut Ui, k: &str, v: String| {
-                        ui.label(RichText::new(k).color(p.muted));
-                        ui.add(egui::Label::new(v).wrap());
-                        ui.end_row();
-                    };
-                    row(ui, "Category", c.category.clone());
-                    if let Some(ctx) = &c.context {
-                        row(ui, "Source", ctx.clone());
-                    }
-                    row(ui, "Kind", widgets::file_kind(&c.path).into());
-                    let rec = rustclean_core::recommend(c, SystemTime::now());
-                    row(
-                        ui,
-                        "Recommendation",
-                        if rec.is_recommended() {
-                            format!("{}  Delete: {}", egui_phosphor::regular::SPARKLE, rec.reason())
-                        } else {
-                            format!("Keep for now: {}", rec.reason())
-                        },
-                    );
-                    row(
-                        ui,
-                        "Size",
-                        if c.size == c.disk_usage {
-                            format_bytes(c.disk_usage)
-                        } else {
-                            format!(
-                                "{} on disk ({} of data)",
-                                format_bytes(c.disk_usage),
-                                format_bytes(c.size)
-                            )
-                        },
-                    );
-                    if let Some(m) = c.fingerprint.modified {
-                        row(ui, "Modified", widgets::date_and_age(m));
-                    }
-                    if let Some(t) = live.and_then(|l| l.created) {
-                        row(ui, "Created", widgets::date_and_age(t));
-                    }
-                    if let Some(t) = live.and_then(|l| l.accessed) {
-                        row(ui, "Last opened", widgets::date_and_age(t));
-                    }
-                    row(
-                        ui,
-                        "Found in",
-                        widgets::tilde_path(&c.target_root, &self.home),
-                    );
-                    row(
-                        ui,
-                        "Removal",
-                        match method {
-                            RemovalMethod::Trash => "Moved to the Trash (restorable)".into(),
-                            RemovalMethod::Quarantine => {
-                                "Moved to RustClean quarantine (restorable)".into()
+                ui.separator();
+
+                let used = ui.cursor().top() - top;
+                ScrollArea::vertical()
+                    .id_salt((id, "detail_scroll"))
+                    .max_height((max_h - used - 40.0).max(80.0))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let why = c.reason.clone().unwrap_or_else(|| match c.class {
+                            SafetyClass::Safe => {
+                                "Rebuilt automatically when it is needed again.".into()
                             }
-                        },
-                    );
-                });
-            ui.add(
-                egui::Label::new(
-                    RichText::new(format!(
-                        "{}/{}",
-                        widgets::short_path(&c.path, &self.home),
-                        c.file_name()
-                    ))
-                    .small()
-                    .monospace()
-                    .color(p.text2),
-                )
-                .wrap(),
-            );
-            match live.map(|l| &l.state) {
-                Some(LiveState::Changed) => widgets::warning(
-                    ui,
-                    "Changed since the scan. It will be skipped; rescan to include the new version.",
-                ),
-                Some(LiveState::Missing) => {
-                    widgets::warning(ui, "No longer exists (the app may have removed it).")
-                }
-                Some(LiveState::Unreadable(e)) => {
-                    widgets::warning(ui, format!("Cannot be read right now: {e}"))
-                }
-                _ => {}
-            }
-            ui.add_space(6.0);
-            let why = c.reason.clone().unwrap_or_else(|| match c.class {
-                SafetyClass::Safe => "Rebuilt automatically when it is needed again.".into(),
-                SafetyClass::Review => {
-                    "Check that you no longer need this before removing it.".into()
-                }
-                _ => "RustClean never removes this.".into(),
+                            SafetyClass::Review => {
+                                "Check that you no longer need this before removing it.".into()
+                            }
+                            _ => "RustClean never removes this.".into(),
+                        });
+                        widgets::callout(
+                            ui,
+                            &format!("{}  Why {}: {why}", widgets::class_icon(c.class), c.class.label()),
+                            widgets::class_tone(c.class),
+                        );
+                        match live.map(|l| &l.state) {
+                            Some(LiveState::Changed) => widgets::warning(
+                                ui,
+                                "Changed since the scan. It will be skipped; rescan to include the new version.",
+                            ),
+                            Some(LiveState::Missing) => widgets::warning(
+                                ui,
+                                "No longer exists (the app may have removed it).",
+                            ),
+                            Some(LiveState::Unreadable(e)) => {
+                                widgets::warning(ui, format!("Cannot be read right now: {e}"))
+                            }
+                            _ => {}
+                        }
+                        ui.add_space(4.0);
+                        egui::Grid::new((id, "detail"))
+                            .num_columns(2)
+                            .spacing([10.0, 5.0])
+                            .show(ui, |ui| {
+                                let row = |ui: &mut Ui, k: &str, v: String| {
+                                    ui.label(RichText::new(k).color(p.muted));
+                                    ui.add(egui::Label::new(v).wrap());
+                                    ui.end_row();
+                                };
+                                row(
+                                    ui,
+                                    "Advice",
+                                    if rec.is_recommended() {
+                                        format!("Delete: {}", rec.reason())
+                                    } else {
+                                        format!("Keep for now: {}", rec.reason())
+                                    },
+                                );
+                                row(ui, "App / group", c.category.clone());
+                                if let Some(ctx) = &c.context {
+                                    row(ui, "Source", ctx.clone());
+                                }
+                                row(ui, "Kind", widgets::file_kind(&c.path).into());
+                                if c.size != c.disk_usage {
+                                    row(
+                                        ui,
+                                        "Size",
+                                        format!(
+                                            "{} on disk ({} of data)",
+                                            format_bytes(c.disk_usage),
+                                            format_bytes(c.size)
+                                        ),
+                                    );
+                                }
+                                if let Some(m) = c.fingerprint.modified {
+                                    row(ui, "Modified", widgets::date_and_age(m));
+                                }
+                                if let Some(t) = live.and_then(|l| l.created) {
+                                    row(ui, "Created", widgets::date_and_age(t));
+                                }
+                                if let Some(t) = live.and_then(|l| l.accessed) {
+                                    row(ui, "Last opened", widgets::date_and_age(t));
+                                }
+                                row(ui, "Found in", widgets::tilde_path(&c.target_root, home));
+                                row(
+                                    ui,
+                                    "Removal",
+                                    match method {
+                                        RemovalMethod::Trash => {
+                                            "Moved to the Trash (restorable)".into()
+                                        }
+                                        RemovalMethod::Quarantine => {
+                                            "Moved to RustClean quarantine (restorable)".into()
+                                        }
+                                    },
+                                );
+                            });
+                        ui.add_space(4.0);
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(widgets::tilde_path(&c.path, home))
+                                    .small()
+                                    .monospace()
+                                    .color(p.text2),
+                            )
+                            .wrap(),
+                        );
+                        let impact = match c.class {
+                            SafetyClass::Safe => {
+                                "If removed: the app recreates it when needed; the first launch or load may be a little slower."
+                            }
+                            SafetyClass::Review => {
+                                "If removed: it may not come back, or the app may lose offline data or history it kept here."
+                            }
+                            _ => "Not removable: RustClean will skip it even if selected.",
+                        };
+                        ui.add(
+                            egui::Label::new(RichText::new(impact).small().color(p.muted)).wrap(),
+                        );
+                    });
             });
-            widgets::callout(
-                ui,
-                &format!("Why {}: {why}", c.class.label()),
-                widgets::class_tone(c.class),
-            );
-            let impact = match c.class {
-                SafetyClass::Safe => {
-                    "If removed: the app recreates it when needed; the first launch or load may be a little slower."
-                }
-                SafetyClass::Review => {
-                    "If removed: it may not come back, or the app may lose offline data or history it kept here."
-                }
-                _ => "Not removable: RustClean will skip it even if selected.",
-            };
-            ui.add(egui::Label::new(RichText::new(impact).small().color(p.text2)).wrap());
-            ui.add_space(6.0);
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button(format!(
-                        "{}  {}",
-                        egui_phosphor::regular::FOLDER_OPEN,
-                        widgets::reveal_label()
-                    ))
-                    .clicked()
-                {
-                    widgets::reveal_in_file_manager(&c.path);
-                }
-                if ui
-                    .button(format!("{}  Copy path", egui_phosphor::regular::COPY))
-                    .clicked()
-                {
-                    ui.ctx().copy_text(c.path.display().to_string());
-                }
-                if ui
-                    .button(egui_phosphor::regular::ARROW_CLOCKWISE)
-                    .on_hover_text("Check the file again")
-                    .clicked()
-                {
-                    refresh = true;
-                }
-            });
-        });
         if close {
             self.detail = None;
         }
@@ -1337,7 +1425,7 @@ impl ScanPage {
         };
         let (select_safe, clear) = widgets::action_bar(ui, &summary, |ui| {
             let p = palette(ui);
-            let label = format!("Clean {n} selected…");
+            let label = format!("{}  Clean {n} selected…", egui_phosphor::regular::BROOM);
             open = ui
                 .add_enabled(n > 0 && !busy, theme::primary_button(ui, &label))
                 .clicked();
@@ -1498,28 +1586,46 @@ impl ScanPage {
                                         .file_name()
                                         .map(|n| n.to_string_lossy().into_owned())
                                         .unwrap_or_default();
-                                    ui.add(egui::Label::new(name).truncate());
+                                    // Line 1: name (truncates) · size · safety.
+                                    // Right-aligned parts are laid out first so
+                                    // they never overlap the name.
+                                    ui.horizontal(|ui| {
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                widgets::class_pill(ui, item.class);
+                                                ui.label(
+                                                    RichText::new(format_bytes(item.disk_usage))
+                                                        .strong(),
+                                                );
+                                                ui.with_layout(
+                                                    egui::Layout::left_to_right(
+                                                        egui::Align::Center,
+                                                    ),
+                                                    |ui| {
+                                                        ui.add(
+                                                            egui::Label::new(name).truncate(),
+                                                        );
+                                                    },
+                                                );
+                                            },
+                                        );
+                                    });
+                                    // Line 2: app · folder.
                                     ui.add(
                                         egui::Label::new(
-                                            RichText::new(widgets::short_path(&item.path, home))
-                                                .small()
-                                                .monospace()
-                                                .color(p.muted),
+                                            RichText::new(format!(
+                                                "{} · {}",
+                                                item.category,
+                                                widgets::short_path(&item.path, home)
+                                            ))
+                                            .small()
+                                            .color(p.muted),
                                         )
                                         .truncate(),
                                     )
                                     .on_hover_text(item.path.display().to_string());
                                 });
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        widgets::class_pill(ui, item.class);
-                                        ui.label(format_bytes(item.disk_usage));
-                                        ui.label(
-                                            RichText::new(&item.category).small().color(p.muted),
-                                        );
-                                    },
-                                );
                             });
                         }
                     });
