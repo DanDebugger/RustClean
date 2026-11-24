@@ -1,0 +1,36 @@
+[package]
+name = "rustclean"
+description = "RustClean – native macOS system cleaner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rustclean"
+path = "src/main.rs"
+
+[dependencies]
+rustclean-core.workspace = true
+rustclean-safety.workspace = true
+rustclean-browser.workspace = true
+rustclean-junk.workspace = true
+rustclean-containers.workspace = true
+rustclean-security.workspace = true
+rustclean-storage.workspace = true
+rustclean-duplicates.workspace = true
+rustclean-apps.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui_extras.workspace = true
+egui-phosphor.workspace = true
+sysinfo.workspace = true
+libc.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+egui_kittest = { workspace = true, features = ["wgpu", "eframe", "snapshot"] }
+serde_json.workspace = true
+tempfile.workspace = true

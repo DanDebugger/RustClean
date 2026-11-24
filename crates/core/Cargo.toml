@@ -1,0 +1,19 @@
+[package]
+name = "rustclean-core"
+description = "Scanner and cleaner engines for RustClean"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustclean-safety.workspace = true
+walkdir.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

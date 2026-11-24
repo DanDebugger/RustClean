@@ -1,0 +1,7 @@
+/target
+
+# Local design mockups (not for the repository)
+/design/
+
+# Release packages (scripts/release.sh)
+/dist/

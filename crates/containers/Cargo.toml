@@ -1,0 +1,18 @@
+[package]
+name = "rustclean-containers"
+description = "Docker cleanup via the Docker Engine API for RustClean"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustclean-core.workspace = true
+bollard.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = ["crates/safety", "crates/core", "crates/browser", "crates/junk", "crates/containers", "crates/security", "crates/storage", "crates/duplicates", "crates/apps", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+
+[workspace.dependencies]
+rustclean-safety = { path = "crates/safety" }
+rustclean-core = { path = "crates/core" }
+rustclean-browser = { path = "crates/browser" }
+rustclean-junk = { path = "crates/junk" }
+rustclean-containers = { path = "crates/containers" }
+rustclean-security = { path = "crates/security" }
+rustclean-storage = { path = "crates/storage" }
+rustclean-duplicates = { path = "crates/duplicates" }
+rustclean-apps = { path = "crates/apps" }
+
+eframe = "0.35"
+egui = "0.35"
+egui_extras = "0.35"
+egui-phosphor = "0.13"
+egui_kittest = "0.35"
+walkdir = "2.5"
+rayon = "1.10"
+sysinfo = "0.38"
+plist = "1.10"
+blake3 = "1.8"
+bollard = { version = "0.21", default-features = false, features = ["pipe"] }
+tokio = { version = "1", features = ["rt", "time", "net"] }
+trash = "5.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
+unicode-normalization = "0.1"
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

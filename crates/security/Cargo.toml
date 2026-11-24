@@ -1,0 +1,15 @@
+[package]
+name = "rustclean-security"
+description = "Read-only security checks (persistence audit) for RustClean"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rustclean-safety.workspace = true
+plist.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
