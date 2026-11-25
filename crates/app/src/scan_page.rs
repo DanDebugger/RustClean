@@ -197,6 +197,11 @@ pub struct ScanPage {
     search: String,
     visible: Vec<usize>,
     detail: Option<usize>,
+    /// Category whose pop-up is open.
+    category_detail: Option<String>,
+    /// Selection mode: checkboxes and the action bar are shown only after
+    /// the user clicks "Select" (or selects something from a pop-up).
+    select_mode: bool,
     live: Option<LiveInfo>,
     toast: Option<(String, Instant)>,
     event: Option<String>,
@@ -235,6 +240,8 @@ impl ScanPage {
             search: String::new(),
             visible: Vec::new(),
             detail: None,
+            category_detail: None,
+            select_mode: false,
             live: None,
             toast: None,
             event: None,
@@ -364,6 +371,7 @@ impl ScanPage {
                     let clean_run = !r.dry_run && r.skipped() + r.failed() + r.not_attempted() == 0;
                     if !r.dry_run {
                         self.forget_removed(&outcome.report);
+                        self.select_mode = self.selected.iter().any(|s| *s);
                         self.disk_changed = true;
                     }
                     if clean_run {
@@ -548,6 +556,7 @@ impl ScanPage {
 
     /// Selects exactly the recommended files (adds to the selection).
     fn select_recommended(&mut self) {
+        self.select_mode = true;
         for (s, rec) in self.selected.iter_mut().zip(&self.recommended) {
             if *rec {
                 *s = true;
@@ -639,6 +648,7 @@ impl ScanPage {
     /// Test helper: select the first `n` Safe files.
     #[cfg(test)]
     pub fn select_for_test(&mut self, n: usize) {
+        self.select_mode = true;
         if let Some(r) = &self.report {
             let mut left = n;
             for (i, c) in r.candidates.iter().enumerate() {
@@ -648,6 +658,18 @@ impl ScanPage {
                 }
             }
         }
+    }
+
+    /// Test helper: open the pop-up of the largest category (or close it).
+    #[cfg(test)]
+    pub fn category_for_test(&mut self, open: bool) {
+        self.category_detail = if open {
+            self.report
+                .as_ref()
+                .and_then(|r| r.by_category().first().map(|c| c.category.clone()))
+        } else {
+            None
+        };
     }
 
     /// Test helper: open (`true`) or close the details of the first
@@ -680,9 +702,9 @@ impl ScanPage {
         }
         let layout = Breakpoint::of(ui.available_width());
 
-        // The action bar appears once something is selected (or a cleanup
+        // The action bar appears only in selection mode (or while a cleanup
         // runs), so the file list gets the space the rest of the time.
-        if self.report.is_some() && (self.selection_totals().0 > 0 || self.clean_job.is_some()) {
+        if self.report.is_some() && (self.select_mode || self.clean_job.is_some()) {
             egui::Panel::bottom(Id::new((self.id, "footer")))
                 .frame(egui::Frame::new().inner_margin(egui::Margin {
                     left: 0,
@@ -704,6 +726,7 @@ impl ScanPage {
                 .show(ui, |ui| self.body_ui(ui, layout, viewport_h));
         }
 
+        self.category_dialog(&ctx);
         self.detail_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.result_dialog(&ctx);
@@ -837,6 +860,23 @@ impl ScanPage {
                 {
                     self.start_scan(ctx);
                 }
+                if self.report.is_some() {
+                    let (text, tip) = if self.select_mode {
+                        (
+                            format!("{}  Done", egui_phosphor::regular::CHECK),
+                            "Leave selection mode (your selection is kept)",
+                        )
+                    } else {
+                        (
+                            format!("{}  Select", egui_phosphor::regular::CHECK_SQUARE),
+                            "Choose files to clean",
+                        )
+                    };
+                    let button = egui::Button::new(text).min_size(egui::vec2(0.0, 32.0));
+                    if ui.add(button).on_hover_text(tip).clicked() {
+                        self.select_mode = !self.select_mode;
+                    }
+                }
             }
         });
         if let Some(job) = &self.scan_job {
@@ -915,8 +955,10 @@ impl ScanPage {
             }
         }
         let total = report.total_disk_usage();
+        let select_mode = self.select_mode;
         let mut toggle = None;
         let mut filter = None;
+        let mut open = None;
         theme::card(ui)
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
@@ -941,23 +983,19 @@ impl ScanPage {
                     let resp = widgets::list_row(
                         ui,
                         active,
-                        Some(state),
+                        select_mode.then_some(state),
                         &s.category,
                         &format_bytes(s.disk_usage),
-                    );
-                    if resp.secondary_clicked() || resp.double_clicked() {
-                        toggle = Some((s.category.clone(), selected != selectable));
-                    } else if resp.clicked() {
-                        // Clicking the checkbox area toggles; the label filters.
+                    )
+                    .on_hover_text("Click for details");
+                    if resp.clicked() {
+                        // Select mode: the checkbox area toggles the whole
+                        // category. Anywhere else opens its pop-up.
                         let pos = resp.interact_pointer_pos().map(|p| p.x - resp.rect.left());
-                        if pos.is_some_and(|x| x < 30.0) && selectable > 0 {
+                        if select_mode && pos.is_some_and(|x| x < 30.0) && selectable > 0 {
                             toggle = Some((s.category.clone(), selected != selectable));
                         } else {
-                            filter = Some(if active {
-                                None
-                            } else {
-                                Some(s.category.clone())
-                            });
+                            open = Some(s.category.clone());
                         }
                     }
                 }
@@ -967,6 +1005,9 @@ impl ScanPage {
         }
         if let Some(f) = filter {
             self.set_category_filter(f);
+        }
+        if open.is_some() {
+            self.category_detail = open;
         }
     }
 
@@ -1000,6 +1041,7 @@ impl ScanPage {
         let counts = self.class_counts();
         let mut category = self.category_filter.clone();
         let mut class = self.class_filter;
+        let mut open = None;
         // ComboBox width excludes its frame and arrow (~36 px each).
         let width = ((ui.available_width() - 8.0) / 2.0 - 36.0).clamp(110.0, 260.0);
         ui.horizontal_wrapped(|ui| {
@@ -1046,7 +1088,18 @@ impl ScanPage {
                 })
                 .response
                 .on_hover_text("Show files by safety");
+            if category.is_some()
+                && ui
+                    .button(format!("{}  Details", egui_phosphor::regular::INFO))
+                    .on_hover_text("About this category, with its files")
+                    .clicked()
+            {
+                open = category.clone();
+            }
         });
+        if open.is_some() {
+            self.category_detail = open;
+        }
         if category != self.category_filter {
             self.set_category_filter(category);
         }
@@ -1091,8 +1144,11 @@ impl ScanPage {
             if ui.add(search).changed() {
                 changed = true;
             }
-            // Works in every layout: filter by category, safety or name,
-            // then select exactly what is listed.
+            // Select mode, every layout: filter by category, safety or
+            // name, then select exactly what is listed.
+            if !self.select_mode {
+                return;
+            }
             if ui
                 .add_enabled(
                     selected_shown < selectable_shown,
@@ -1142,6 +1198,7 @@ impl ScanPage {
         let is_rec = |i: usize| recommended.get(i).copied().unwrap_or(false);
         let visible = &self.visible;
         let detail = self.detail;
+        let select_mode = self.select_mode;
         let home = self.home.as_path();
         let mut clicked = None;
         let body_h = ui.text_style_height(&egui::TextStyle::Body);
@@ -1160,7 +1217,7 @@ impl ScanPage {
                                 let c = &report.candidates[idx];
                                 let resp = widgets::file_card(
                                     ui,
-                                    &mut selected[idx],
+                                    select_mode.then_some(&mut selected[idx]),
                                     c,
                                     detail == Some(idx),
                                     is_rec(idx),
@@ -1174,15 +1231,21 @@ impl ScanPage {
                         });
                 } else {
                     let row_h = body_h + small_h + 14.0;
-                    ui.push_id((self.id, "table"), |ui| {
-                        TableBuilder::new(ui)
+                    ui.push_id((self.id, "table", select_mode), |ui| {
+                        let mut builder = TableBuilder::new(ui)
                             .striped(false)
                             .resizable(false)
                             .sense(egui::Sense::click())
                             .auto_shrink([false, false])
                             .min_scrolled_height(0.0)
-                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                            .column(Column::exact(34.0))
+                            .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
+                        // The checkbox column exists only in select mode.
+                        if select_mode {
+                            builder = builder.column(Column::exact(34.0));
+                        } else {
+                            builder = builder.column(Column::exact(8.0));
+                        }
+                        builder
                             .column(Column::remainder().at_least(160.0).clip(true))
                             .column(Column::exact(84.0))
                             .column(Column::exact(124.0).clip(true))
@@ -1199,6 +1262,9 @@ impl ScanPage {
                                     let c = &report.candidates[idx];
                                     row.set_selected(detail == Some(idx));
                                     row.col(|ui| {
+                                        if !select_mode {
+                                            return;
+                                        }
                                         ui.add_space(8.0);
                                         if c.class.is_selectable() {
                                             ui.checkbox(&mut selected[idx], "");
@@ -1245,7 +1311,11 @@ impl ScanPage {
     /// keeps the full width. Closed with ×, Escape or a click outside.
     fn detail_dialog(&mut self, ctx: &egui::Context) {
         // One dialog at a time: the confirmation and result take priority.
-        if self.detail.is_none() || self.confirm.is_some() || self.result.is_some() {
+        if self.detail.is_none()
+            || self.category_detail.is_some()
+            || self.confirm.is_some()
+            || self.result.is_some()
+        {
             return;
         }
         let screen = ctx.content_rect();
@@ -1258,6 +1328,273 @@ impl ScanPage {
         if modal.should_close() {
             self.detail = None;
             self.live = None;
+        }
+    }
+
+    /// Pop-up for one category (e.g. "Logs" or an app): what it is, its
+    /// size and safety mix, its files, and quick actions.
+    fn category_dialog(&mut self, ctx: &egui::Context) {
+        use egui_phosphor::regular as icon;
+        let Some(cat) = self.category_detail.clone() else {
+            return;
+        };
+        if self.confirm.is_some() || self.result.is_some() {
+            return;
+        }
+        let Some(report) = &self.report else {
+            self.category_detail = None;
+            return;
+        };
+        let idxs: Vec<usize> = report
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.category == cat)
+            .map(|(i, _)| i)
+            .collect();
+        if idxs.is_empty() {
+            self.category_detail = None;
+            return;
+        }
+        let cands = &report.candidates;
+        let size: u64 = idxs.iter().map(|&i| cands[i].disk_usage).sum();
+        let count = |class: SafetyClass| idxs.iter().filter(|&&i| cands[i].class == class).count();
+        let (safe, review) = (count(SafetyClass::Safe), count(SafetyClass::Review));
+        let locked = idxs.len() - safe - review;
+        let selectable: Vec<usize> = idxs
+            .iter()
+            .copied()
+            .filter(|&i| cands[i].class.is_selectable())
+            .collect();
+        let all_selected = !selectable.is_empty() && selectable.iter().all(|&i| self.selected[i]);
+        // Where it comes from, and why it has its class (from the targets).
+        let targets: Vec<&rustclean_core::ScanTarget> = report
+            .targets
+            .iter()
+            .filter(|t| t.category == cat)
+            .collect();
+        // A reason or label is shown only when every location shares it;
+        // otherwise one folder's note would read as the whole category's.
+        let shared = |f: fn(&rustclean_core::ScanTarget) -> Option<String>| {
+            let first = targets.first().and_then(|t| f(t))?;
+            targets
+                .iter()
+                .all(|t| f(t).as_ref() == Some(&first))
+                .then_some(first)
+        };
+        let reason = shared(|t| t.reason.clone());
+        let context = shared(|t| t.context.clone());
+        let mut roots: Vec<String> = targets
+            .iter()
+            .map(|t| widgets::tilde_path(&t.root, &self.home))
+            .collect();
+        roots.dedup();
+        let more_roots = roots.len().saturating_sub(3);
+        roots.truncate(3);
+
+        let screen = ctx.content_rect();
+        let width = (screen.width() - 32.0).clamp(300.0, 600.0);
+        let list_h = (screen.height() * 0.85 - 330.0).clamp(140.0, 360.0);
+        let home = self.home.as_path();
+        let selected = &self.selected;
+        let mut flips: Vec<usize> = Vec::new();
+        let mut select_all = None;
+        let mut show_in_list = false;
+        let mut open_file = None;
+        let mut close = false;
+        let modal = Modal::new(Id::new((self.id, "category_modal"))).show(ctx, |ui| {
+            ui.set_width(width);
+            let p = palette(ui);
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new(icon::FOLDER_SIMPLE)
+                        .size(18.0)
+                        .color(p.accent),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(icon::X).on_hover_text("Close").clicked() {
+                        close = true;
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&cat).strong().size(17.0)).truncate(),
+                        );
+                    });
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {} {}",
+                        format_bytes(size),
+                        idxs.len(),
+                        if idxs.len() == 1 { "file" } else { "files" }
+                    ))
+                    .strong(),
+                );
+                if safe > 0 {
+                    widgets::pill(
+                        ui,
+                        format!("{}  Safe {safe}", widgets::class_icon(SafetyClass::Safe)),
+                        Tone::Safe,
+                    );
+                }
+                if review > 0 {
+                    widgets::pill(
+                        ui,
+                        format!(
+                            "{}  Review {review}",
+                            widgets::class_icon(SafetyClass::Review)
+                        ),
+                        Tone::Review,
+                    );
+                }
+                if locked > 0 {
+                    widgets::pill(
+                        ui,
+                        format!("{}  Not removable {locked}", icon::LOCK),
+                        Tone::Protected,
+                    );
+                }
+            });
+            if let Some(r) = &reason {
+                widgets::callout(ui, r, if review > 0 { Tone::Review } else { Tone::Info });
+            }
+            if let Some(c) = &context {
+                ui.add(egui::Label::new(RichText::new(c).small().color(p.muted)).wrap());
+            }
+            if !roots.is_empty() {
+                let mut text = format!("Found in {}", roots.join(", "));
+                if more_roots > 0 {
+                    text.push_str(&format!(" and {more_roots} more"));
+                }
+                ui.add(
+                    egui::Label::new(RichText::new(text).small().monospace().color(p.text2)).wrap(),
+                );
+            }
+            ui.separator();
+            let row_h = ui.text_style_height(&egui::TextStyle::Body)
+                + ui.text_style_height(&egui::TextStyle::Small)
+                + 10.0;
+            ScrollArea::vertical()
+                .id_salt((self.id, "category_files"))
+                .max_height(list_h)
+                .auto_shrink([false, true])
+                .show_rows(ui, row_h, idxs.len(), |ui, range| {
+                    for &i in &idxs[range] {
+                        let c = &cands[i];
+                        ui.horizontal(|ui| {
+                            ui.set_height(row_h - 4.0);
+                            let mut on = selected[i];
+                            if c.class.is_selectable() {
+                                if ui.checkbox(&mut on, "").changed() {
+                                    flips.push(i);
+                                }
+                            } else {
+                                ui.add_enabled(false, Checkbox::new(&mut false, ""))
+                                    .on_disabled_hover_text("RustClean never removes this file");
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    widgets::class_pill(ui, c.class);
+                                    ui.label(RichText::new(format_bytes(c.disk_usage)).strong());
+                                    ui.with_layout(
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            let name = ui
+                                                .add(
+                                                    egui::Label::new(
+                                                        RichText::new(c.file_name()).color(p.text),
+                                                    )
+                                                    .truncate()
+                                                    .sense(egui::Sense::click()),
+                                                )
+                                                .on_hover_text("Open this file's details")
+                                                .on_hover_cursor(egui::CursorIcon::PointingHand);
+                                            if name.clicked() {
+                                                open_file = Some(i);
+                                            }
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(widgets::short_path(
+                                                        &c.path, home,
+                                                    ))
+                                                    .small()
+                                                    .monospace()
+                                                    .color(p.muted),
+                                                )
+                                                .truncate(),
+                                            );
+                                        },
+                                    );
+                                },
+                            );
+                        });
+                    }
+                });
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                if !selectable.is_empty() {
+                    let label = if all_selected {
+                        format!("{}  Unselect all", icon::SQUARE)
+                    } else {
+                        format!(
+                            "{}  Select all removable ({})",
+                            icon::CHECK_SQUARE,
+                            selectable.len()
+                        )
+                    };
+                    if ui
+                        .button(label)
+                        .on_hover_text(
+                            "Review files still need your confirmation before anything moves",
+                        )
+                        .clicked()
+                    {
+                        select_all = Some(!all_selected);
+                    }
+                }
+                if ui
+                    .button(format!("{}  Show in list", icon::FUNNEL))
+                    .on_hover_text("Filter the file list to this category")
+                    .clicked()
+                {
+                    show_in_list = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Done").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        let mut any_on = false;
+        for i in flips {
+            if let Some(s) = self.selected.get_mut(i) {
+                *s = !*s;
+                any_on |= *s;
+            }
+        }
+        if let Some(on) = select_all {
+            self.toggle_category(&cat, on);
+            any_on |= on;
+        }
+        if any_on {
+            self.select_mode = true;
+        }
+        if show_in_list {
+            self.set_category_filter(Some(cat));
+            close = true;
+        }
+        if let Some(i) = open_file {
+            // One dialog at a time: the file's details replace this one.
+            self.detail = Some(i);
+            self.live = None;
+            close = true;
+        }
+        if close || modal.should_close() {
+            self.category_detail = None;
         }
     }
 
@@ -1538,6 +1875,9 @@ impl ScanPage {
             });
         if toggle && let Some(s) = self.selected.get_mut(idx) {
             *s = !*s;
+            if *s {
+                self.select_mode = true;
+            }
         }
         if let Some(i) = go {
             self.detail = Some(i);
@@ -2140,6 +2480,21 @@ mod tests {
         // Alignment survives a cleanup.
         p.forget_removed(&removed_report(&["b"]));
         assert_eq!(p.recommended, vec![true, false, false]);
+    }
+
+    #[test]
+    fn selecting_from_anywhere_enters_select_mode() {
+        let mut p = page();
+        assert!(!p.select_mode, "lists start without checkboxes");
+        // Filtering and "select shown" are plain list operations…
+        p.set_category_filter(Some("A".into()));
+        assert!(!p.select_mode);
+        // …but choosing files from a pop-up or banner enters select mode.
+        p.select_recommended();
+        assert!(p.select_mode);
+        p.select_mode = false;
+        p.toggle_category("B", true);
+        assert_eq!(p.selected, vec![false, false, false, true]);
     }
 
     #[test]

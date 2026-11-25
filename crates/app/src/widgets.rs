@@ -531,10 +531,11 @@ pub fn file_name_label(ui: &mut Ui, name: &str, recommended: bool) -> Response {
     }
 }
 
-/// One file as a stacked card row (narrow layout).
+/// One file as a stacked card row (narrow layout). `selected` is `None`
+/// outside select mode (no checkbox).
 pub fn file_card(
     ui: &mut Ui,
-    selected: &mut bool,
+    selected: Option<&mut bool>,
     c: &rustclean_core::Candidate,
     active: bool,
     recommended: bool,
@@ -550,10 +551,14 @@ pub fn file_card(
             ui.set_width(ui.available_width());
             ui.set_height(height - 17.0);
             ui.horizontal(|ui| {
-                if c.class.is_selectable() {
-                    ui.checkbox(selected, "");
-                } else {
-                    ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
+                match selected {
+                    None => {}
+                    Some(s) if c.class.is_selectable() => {
+                        ui.checkbox(s, "");
+                    }
+                    Some(_) => {
+                        ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
+                    }
                 }
                 ui.vertical(|ui| {
                     file_name_label(ui, &c.file_name(), recommended);

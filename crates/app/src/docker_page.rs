@@ -43,6 +43,10 @@ pub struct DockerPage {
     pub last_scan: Option<SystemTime>,
     selected: Vec<bool>,
     kind_filter: Option<ItemKind>,
+    /// Checkboxes and the action bar appear only after "Select".
+    select_mode: bool,
+    /// Item whose details pop-up is open.
+    detail: Option<usize>,
 
     confirm: Option<ConfirmState>,
     clean_job: Option<(Job<Result<DockerCleanupReport, String>>, usize)>,
@@ -63,6 +67,8 @@ impl DockerPage {
             last_scan: None,
             selected: Vec::new(),
             kind_filter: None,
+            select_mode: false,
+            detail: None,
             confirm: None,
             clean_job: None,
             result: None,
@@ -79,6 +85,13 @@ impl DockerPage {
             .map(|i| i.class == SafetyClass::Safe)
             .collect();
         self.report = Some(report);
+        self.select_mode = true;
+    }
+
+    /// Test helper: open the details of the first item (or close them).
+    #[cfg(test)]
+    pub fn detail_for_test(&mut self, open: bool) {
+        self.detail = open.then_some(0);
     }
 
     /// Test helper: open the confirmation dialog for the current selection.
@@ -146,6 +159,8 @@ impl DockerPage {
             .map(|i| i.class.is_selectable() && keep.contains(&(i.kind, i.id.clone())))
             .collect();
         self.report = Some(report);
+        // Indices refer to the old list.
+        self.detail = None;
     }
 
     /// Selection keyed by item, so it survives a rescan (kind + id).
@@ -208,6 +223,10 @@ impl DockerPage {
                     let real = !report.dry_run;
                     self.result = Some(report);
                     if real {
+                        // Done: leave select mode; the result dialog lists
+                        // anything that was skipped or failed.
+                        self.selected.iter_mut().for_each(|s| *s = false);
+                        self.select_mode = false;
                         // Engine state changed; show the current truth.
                         self.start_scan(ctx);
                     }
@@ -232,8 +251,7 @@ impl DockerPage {
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
-        let any_selected = self.selected.iter().any(|s| *s);
-        if self.report.is_some() && (any_selected || self.clean_job.is_some()) {
+        if self.report.is_some() && (self.select_mode || self.clean_job.is_some()) {
             egui::Panel::bottom("docker_footer")
                 .frame(egui::Frame::new().inner_margin(egui::Margin {
                     left: 0,
@@ -254,6 +272,7 @@ impl DockerPage {
             ui.add_space(6.0);
             self.table_ui(ui);
         }
+        self.detail_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.result_dialog(&ctx);
     }
@@ -272,8 +291,11 @@ impl DockerPage {
             None => "Scanning only asks Docker for disk usage; nothing is removed.".into(),
         };
         let mut scan = false;
+        let mut toggle_select = false;
         let busy = self.is_busy();
         let has_engine = !self.endpoints.is_empty();
+        let has_report = self.report.is_some();
+        let select_mode = self.select_mode;
         let label = if self.report.is_some() {
             format!("{}  Rescan", egui_phosphor::regular::ARROW_CLOCKWISE)
         } else {
@@ -282,13 +304,36 @@ impl DockerPage {
         widgets::header_with_action(ui, Some("Cleanup"), "Docker", Some(&subtitle), |ui| {
             if busy {
                 ui.spinner();
-            } else if ui
-                .add_enabled(has_engine, crate::theme::primary_button(ui, &label))
-                .clicked()
-            {
-                scan = true;
+            } else {
+                if ui
+                    .add_enabled(has_engine, crate::theme::primary_button(ui, &label))
+                    .clicked()
+                {
+                    scan = true;
+                }
+                if has_report {
+                    let text = if select_mode {
+                        format!("{}  Done", egui_phosphor::regular::CHECK)
+                    } else {
+                        format!("{}  Select", egui_phosphor::regular::CHECK_SQUARE)
+                    };
+                    if ui
+                        .add(Button::new(text).min_size(egui::vec2(0.0, 32.0)))
+                        .on_hover_text(if select_mode {
+                            "Leave selection mode (your selection is kept)"
+                        } else {
+                            "Choose Docker items to remove"
+                        })
+                        .clicked()
+                    {
+                        toggle_select = true;
+                    }
+                }
             }
         });
+        if toggle_select {
+            self.select_mode = !self.select_mode;
+        }
 
         if self.endpoints.is_empty() {
             widgets::callout(
@@ -464,6 +509,9 @@ impl DockerPage {
         let narrow = ui.available_width() < 640.0;
         let body_h = ui.text_style_height(&egui::TextStyle::Body);
         let small_h = ui.text_style_height(&egui::TextStyle::Small);
+        let select_mode = self.select_mode;
+        let open_detail = self.detail;
+        let mut clicked = None;
         let selected = &mut self.selected;
         crate::theme::card(ui)
             .inner_margin(egui::Margin::same(0))
@@ -477,13 +525,19 @@ impl DockerPage {
                         .show_rows(ui, row_h, visible.len(), |ui, range| {
                             for &idx in &visible[range] {
                                 let item = &report.items[idx];
-                                egui::Frame::new()
+                                let resp = egui::Frame::new()
+                                    .fill(if open_detail == Some(idx) {
+                                        p.accent_soft
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
                                     .inner_margin(egui::Margin::symmetric(12, 8))
                                     .show(ui, |ui| {
                                         ui.set_width(ui.available_width());
                                         ui.set_height(row_h - 17.0);
                                         ui.horizontal(|ui| {
-                                            if item.class.is_selectable() {
+                                            if !select_mode {
+                                            } else if item.class.is_selectable() {
                                                 ui.checkbox(&mut selected[idx], "");
                                             } else {
                                                 ui.add_enabled(
@@ -524,68 +578,219 @@ impl DockerPage {
                                                 });
                                             });
                                         });
-                                    });
+                                    })
+                                    .response
+                                    .interact(egui::Sense::click());
+                                if resp.clicked() {
+                                    clicked = Some(idx);
+                                }
                             }
                         });
                     return;
                 }
                 let row_h = body_h + small_h + 14.0;
-                TableBuilder::new(ui)
-                    .striped(false)
-                    .resizable(false)
-                    .auto_shrink([false, false])
-                    .min_scrolled_height(0.0)
-                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                    .column(Column::exact(34.0))
-                    .column(Column::remainder().at_least(160.0).clip(true))
-                    .column(Column::exact(84.0))
-                    .column(Column::exact(120.0))
-                    .header(30.0, |mut h| {
-                        for t in ["", "Item", "Size", "Safety"] {
-                            h.col(|ui| {
-                                ui.label(RichText::new(t).small().strong().color(p.muted));
-                            });
-                        }
-                    })
-                    .body(|body| {
-                        body.rows(row_h, visible.len(), |mut row| {
-                            let idx = visible[row.index()];
-                            let item = &report.items[idx];
-                            row.col(|ui| {
-                                ui.add_space(8.0);
-                                if item.class.is_selectable() {
-                                    ui.checkbox(&mut selected[idx], "");
-                                } else {
-                                    ui.add_enabled(false, Checkbox::new(&mut false, ""));
-                                }
-                            });
-                            row.col(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.label(RichText::new(&item.name).color(p.text))
-                                        .on_hover_text(&item.id);
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{} · {}",
-                                            item.kind.label(),
-                                            item.detail
-                                        ))
-                                        .small()
-                                        .color(p.muted),
-                                    );
+                ui.push_id(("docker_table", select_mode), |ui| {
+                    TableBuilder::new(ui)
+                        .striped(false)
+                        .resizable(false)
+                        .sense(egui::Sense::click())
+                        .auto_shrink([false, false])
+                        .min_scrolled_height(0.0)
+                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                        .column(Column::exact(if select_mode { 34.0 } else { 8.0 }))
+                        .column(Column::remainder().at_least(160.0).clip(true))
+                        .column(Column::exact(84.0))
+                        .column(Column::exact(120.0))
+                        .header(30.0, |mut h| {
+                            for t in ["", "Item", "Size", "Safety"] {
+                                h.col(|ui| {
+                                    ui.label(RichText::new(t).small().strong().color(p.muted));
                                 });
-                            });
-                            row.col(|ui| {
-                                ui.label(format_bytes(item.size));
-                            });
-                            row.col(|ui| {
-                                let r = widgets::class_pill(ui, item.class);
-                                if let Some(reason) = &item.reason {
-                                    r.on_hover_text(reason);
+                            }
+                        })
+                        .body(|body| {
+                            body.rows(row_h, visible.len(), |mut row| {
+                                let idx = visible[row.index()];
+                                let item = &report.items[idx];
+                                row.set_selected(open_detail == Some(idx));
+                                row.col(|ui| {
+                                    if !select_mode {
+                                        return;
+                                    }
+                                    ui.add_space(8.0);
+                                    if item.class.is_selectable() {
+                                        ui.checkbox(&mut selected[idx], "");
+                                    } else {
+                                        ui.add_enabled(false, Checkbox::new(&mut false, ""));
+                                    }
+                                });
+                                row.col(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new(&item.name).color(p.text))
+                                            .on_hover_text(&item.id);
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} · {}",
+                                                item.kind.label(),
+                                                item.detail
+                                            ))
+                                            .small()
+                                            .color(p.muted),
+                                        );
+                                    });
+                                });
+                                row.col(|ui| {
+                                    ui.label(format_bytes(item.size));
+                                });
+                                row.col(|ui| {
+                                    let r = widgets::class_pill(ui, item.class);
+                                    if let Some(reason) = &item.reason {
+                                        r.on_hover_text(reason);
+                                    }
+                                });
+                                if row.response().clicked() {
+                                    clicked = Some(idx);
                                 }
                             });
                         });
-                    });
+                });
             });
+        if clicked.is_some() {
+            self.detail = clicked;
+        }
+    }
+
+    /// Details pop-up for one Docker item: what it is, why it has its
+    /// class, what removing it means, and a select toggle.
+    fn detail_dialog(&mut self, ctx: &egui::Context) {
+        use egui_phosphor::regular as icon;
+        if self.confirm.is_some() || self.result.is_some() {
+            return;
+        }
+        let Some(idx) = self.detail else { return };
+        let Some(item) = self.report.as_ref().and_then(|r| r.items.get(idx)) else {
+            self.detail = None;
+            return;
+        };
+        let is_selected = self.selected.get(idx).copied().unwrap_or(false);
+        let width = (ctx.content_rect().width() - 32.0).clamp(300.0, 560.0);
+        let mut toggle = false;
+        let mut close = false;
+        let modal = Modal::new(Id::new("docker_detail")).show(ctx, |ui| {
+            ui.set_width(width);
+            let p = crate::theme::palette(ui);
+            let kind_icon = match item.kind {
+                ItemKind::Container => icon::PACKAGE,
+                ItemKind::Image => icon::STACK,
+                ItemKind::Volume => icon::DATABASE,
+                ItemKind::BuildCache => icon::HAMMER,
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(kind_icon).size(18.0).color(p.accent));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button(icon::X).on_hover_text("Close").clicked() {
+                        close = true;
+                    }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(&item.name).strong().size(17.0))
+                                .truncate(),
+                        );
+                    });
+                });
+            });
+            ui.horizontal_wrapped(|ui| {
+                widgets::class_pill(ui, item.class);
+                ui.label(RichText::new(format_bytes(item.size)).strong());
+                ui.label(RichText::new(item.kind.label()).color(p.muted));
+            });
+            ui.horizontal_wrapped(|ui| {
+                if item.class.is_selectable() {
+                    let button = if is_selected {
+                        Button::new(
+                            RichText::new(format!("{}  Selected for removal", icon::CHECK_SQUARE))
+                                .color(p.accent),
+                        )
+                        .fill(p.accent_soft)
+                    } else {
+                        Button::new(format!("{}  Select for removal", icon::SQUARE))
+                    };
+                    if ui.add(button).clicked() {
+                        toggle = true;
+                    }
+                } else {
+                    ui.add_enabled(
+                        false,
+                        Button::new(format!("{}  Cannot be removed", icon::LOCK_SIMPLE)),
+                    );
+                }
+                if ui.button(format!("{}  Copy ID", icon::COPY)).clicked() {
+                    ui.ctx().copy_text(item.id.clone());
+                }
+            });
+            ui.separator();
+            if let Some(reason) = &item.reason {
+                widgets::callout(
+                    ui,
+                    &format!(
+                        "{}  Why {}: {reason}",
+                        widgets::class_icon(item.class),
+                        item.class.label()
+                    ),
+                    widgets::class_tone(item.class),
+                );
+            }
+            ui.add_space(4.0);
+            egui::Grid::new("docker_detail_grid")
+                .num_columns(2)
+                .spacing([10.0, 5.0])
+                .show(ui, |ui| {
+                    let row = |ui: &mut Ui, k: &str, v: &str| {
+                        ui.label(RichText::new(k).color(p.muted));
+                        ui.add(egui::Label::new(v).wrap());
+                        ui.end_row();
+                    };
+                    row(ui, "Type", item.kind.label());
+                    if !item.detail.is_empty() {
+                        row(ui, "Details", &item.detail);
+                    }
+                    row(ui, "ID", &item.id);
+                    row(ui, "Removal", "Through the Docker API; cannot be undone");
+                });
+            let impact = match item.kind {
+                ItemKind::Container => {
+                    "If removed: the container's own files and logs are lost. Its image stays."
+                }
+                ItemKind::Image => {
+                    "If removed: it must be pulled or built again the next time it is needed."
+                }
+                ItemKind::Volume => {
+                    "If removed: the data in the volume (often a database) is gone for good."
+                }
+                ItemKind::BuildCache => {
+                    "If removed: the next builds take longer while the cache is rebuilt."
+                }
+            };
+            ui.add(egui::Label::new(RichText::new(impact).small().color(p.muted)).wrap());
+            ui.separator();
+            // A row, so the right-aligned layout cannot take the full height.
+            ui.horizontal(|ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Done").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if toggle && let Some(s) = self.selected.get_mut(idx) {
+            *s = !*s;
+            if *s {
+                self.select_mode = true;
+            }
+        }
+        if close || modal.should_close() {
+            self.detail = None;
+        }
     }
 
     fn footer_ui(&mut self, ui: &mut Ui) {
@@ -890,6 +1095,19 @@ mod tests {
             item(ItemKind::Container, "c1", SafetyClass::Review),
         ]));
         assert_eq!(p.selected, vec![false, false, true]);
+    }
+
+    #[test]
+    fn a_rescan_closes_item_details() {
+        let mut p = page();
+        p.apply_report(report(vec![item(ItemKind::Image, "i1", SafetyClass::Safe)]));
+        p.detail = Some(0);
+        p.apply_report(report(vec![item(ItemKind::Image, "i2", SafetyClass::Safe)]));
+        assert_eq!(
+            p.detail, None,
+            "an index into the old list must not survive"
+        );
+        assert!(!p.select_mode);
     }
 
     #[test]

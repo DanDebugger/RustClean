@@ -157,8 +157,10 @@ and only after raising `rust-version`. Windows release builds need
   - 640–960 px: category/safety dropdowns, table fills the remaining height
   - < 640 px: dropdowns, stacked cards
 
-  File details are a dialog (`Modal`) in every layout, never a panel that
-  takes list space. Height matters too: the file list gets what is left of
+  File, category and Docker item details are dialogs (`Modal`) in every
+  layout, never panels that take list space. Lists are read-only until the
+  user enters selection mode (`select_mode`): checkboxes, "Select shown" and
+  the action bar exist only there. Height matters too: the file list gets what is left of
   the window (min `MIN_LIST_H`), and windows under 640 px tall get one-line
   banners. Below an 860 px window the sidebar becomes a page picker. Use
   `card_grid` for card rows; `ui.columns` misbehaved at one column (a card

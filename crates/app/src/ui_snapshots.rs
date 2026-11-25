@@ -174,6 +174,22 @@ fn ui_snapshots() {
         shoot(&mut harness, &out, "dashboard", w);
 
         harness.state_mut().page = Page::JunkCleaner;
+        shoot(&mut harness, &out, "junk-browse", w);
+        harness
+            .state_mut()
+            .state
+            .as_mut()
+            .unwrap()
+            .junk
+            .category_for_test(true);
+        shoot(&mut harness, &out, "junk-category", w);
+        harness
+            .state_mut()
+            .state
+            .as_mut()
+            .unwrap()
+            .junk
+            .category_for_test(false);
         harness
             .state_mut()
             .state
@@ -233,6 +249,21 @@ fn ui_snapshots() {
         shoot(&mut harness, &out, "antivirus", w);
 
         harness.state_mut().page = Page::Docker;
+        harness
+            .state_mut()
+            .state
+            .as_mut()
+            .unwrap()
+            .docker
+            .detail_for_test(true);
+        shoot(&mut harness, &out, "docker-detail", w);
+        harness
+            .state_mut()
+            .state
+            .as_mut()
+            .unwrap()
+            .docker
+            .detail_for_test(false);
         harness
             .state_mut()
             .state

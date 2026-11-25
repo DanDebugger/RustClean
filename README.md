@@ -23,9 +23,10 @@ connections.
 | **Backup & Sync** | Placeholder (shown as *soon*); design not decided yet | — |
 | **Quarantine** | Earlier "Quarantine" cleanups | Restore, or delete permanently (confirmed) |
 
-**Cleaning flow:** select files (per file, per app/category, or *Select
-shown* for the current filter, or *Select for cleanup* in a file's details
-dialog) → the action bar appears → *Clean N selected…* → one confirmation
+**Cleaning flow:** lists start read-only (no checkboxes). Click a file,
+category or Docker item to open its details pop-up; click **Select** (or
+select something from a pop-up) to enter selection mode, where checkboxes,
+*Select shown* and the action bar appear → *Clean N selected…* → one confirmation
 dialog with a summary and a per-file review list (untick any file to keep
 it) → **Move N files to Trash**
 (or Quarantine). *Simulate first* is optional; after a simulation, *Clean
@@ -53,8 +54,10 @@ down to phone width (min window 360 px):
 | < 860 px window | Sidebar replaced by the page picker |
 
 Clicking a file opens its details ("why" it has its class, dates, select /
-reveal / copy, previous / next) in a dialog in every layout. The action bar
-appears only while files are selected. Windows shorter than 640 px get
+reveal / copy, previous / next) in a dialog in every layout; clicking a
+category (e.g. *Logs*, or an app in App Caches) opens a pop-up with its
+size, safety mix and files. Checkboxes and the action bar appear only in
+selection mode (**Select** / **Done** in the page header). Windows shorter than 640 px get
 one-line banners so the file list keeps its space.
 
 Rendered screenshots of the real app (fake home folder, Docker fixture data;
