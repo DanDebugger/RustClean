@@ -23,10 +23,10 @@ use crate::theme::{self, palette};
 use crate::widgets::{self, Tone};
 
 const TOAST_FOR: Duration = Duration::from_secs(6);
-/// Width of the detail panel in wide/medium layouts.
-const DETAIL_W: f32 = 290.0;
-/// Height limit of the detail panel when it sits above the file list.
-const DETAIL_STACKED_H: f32 = 240.0;
+/// Width of the category list in the wide layout.
+const CATEGORIES_W: f32 = 240.0;
+/// The file list never gets shorter than this; below it the page scrolls.
+const MIN_LIST_H: f32 = 280.0;
 
 /// Layout by available content width.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -345,9 +345,11 @@ impl ScanPage {
                     self.clean_job = None;
                     let r = &outcome.report;
                     let verb = match (r.dry_run, r.method) {
-                        (true, _) => "Simulated",
-                        (false, RemovalMethod::Trash) => "Moved to Trash",
-                        (false, RemovalMethod::Quarantine) => "Quarantined",
+                        (true, _) => "Simulated".to_string(),
+                        (false, RemovalMethod::Trash) => {
+                            format!("Moved to {}", widgets::trash_name())
+                        }
+                        (false, RemovalMethod::Quarantine) => "Quarantined".to_string(),
                     };
                     let n = if r.dry_run {
                         r.would_remove()
@@ -373,9 +375,12 @@ impl ScanPage {
                                 r.removed(),
                                 format_bytes(r.bytes_affected()),
                                 if r.method == RemovalMethod::Trash {
-                                    "Empty the Trash to free the space."
+                                    format!(
+                                        "Disk space is freed when you empty the {}.",
+                                        widgets::trash_name()
+                                    )
                                 } else {
-                                    "Restore from Quarantine any time."
+                                    "Restore from Quarantine any time.".to_string()
                                 }
                             ),
                             Instant::now(),
@@ -551,7 +556,8 @@ impl ScanPage {
     }
 
     /// "Smart recommendation" card above the results.
-    fn recommendation_banner(&mut self, ui: &mut Ui) {
+    /// `short` drops the explanatory line (phones and short windows).
+    fn recommendation_banner(&mut self, ui: &mut Ui, short: bool) {
         let (n, bytes) = self.recommended_totals();
         if n == 0 {
             return;
@@ -587,11 +593,13 @@ impl ScanPage {
                         .strong()
                         .color(fg),
                     );
-                    ui.label(
-                        RichText::new("Safe cache data, unchanged for at least a day.")
-                            .small()
-                            .color(fg),
-                    );
+                    if !short {
+                        ui.label(
+                            RichText::new("Safe cache data, unchanged for at least a day.")
+                                .small()
+                                .color(fg),
+                        );
+                    }
                     if ui
                         .add_enabled(!all_selected, Button::new(format!(
                             "{}  Select recommended",
@@ -628,8 +636,7 @@ impl ScanPage {
             .fold((0, 0), |(n, b), (c, _)| (n + 1, b + c.disk_usage))
     }
 
-    /// Test helper: select the first `n` Safe files and show the first one's
-    /// details.
+    /// Test helper: select the first `n` Safe files.
     #[cfg(test)]
     pub fn select_for_test(&mut self, n: usize) {
         if let Some(r) = &self.report {
@@ -637,13 +644,22 @@ impl ScanPage {
             for (i, c) in r.candidates.iter().enumerate() {
                 if left > 0 && c.class == SafetyClass::Safe {
                     self.selected[i] = true;
-                    if self.detail.is_none() {
-                        self.detail = Some(i);
-                    }
                     left -= 1;
                 }
             }
         }
+    }
+
+    /// Test helper: open (`true`) or close the details of the first
+    /// selected file.
+    #[cfg(test)]
+    pub fn detail_for_test(&mut self, open: bool) {
+        self.detail = if open {
+            self.selected.iter().position(|s| *s)
+        } else {
+            None
+        };
+        self.live = None;
     }
 
     #[cfg(test)]
@@ -664,7 +680,9 @@ impl ScanPage {
         }
         let layout = Breakpoint::of(ui.available_width());
 
-        if self.report.is_some() {
+        // The action bar appears once something is selected (or a cleanup
+        // runs), so the file list gets the space the rest of the time.
+        if self.report.is_some() && (self.selection_totals().0 > 0 || self.clean_job.is_some()) {
             egui::Panel::bottom(Id::new((self.id, "footer")))
                 .frame(egui::Frame::new().inner_margin(egui::Margin {
                     left: 0,
@@ -676,22 +694,27 @@ impl ScanPage {
         }
 
         self.header_ui(ui, &ctx, layout);
+        let viewport_h = ui.available_height();
         if layout == Breakpoint::Wide {
-            self.body_ui(ui, layout);
+            self.body_ui(ui, layout, viewport_h);
         } else {
             ScrollArea::vertical()
                 .id_salt((self.id, "page"))
                 .auto_shrink([false, false])
-                .show(ui, |ui| self.body_ui(ui, layout));
+                .show(ui, |ui| self.body_ui(ui, layout, viewport_h));
         }
 
+        self.detail_dialog(&ctx);
         self.confirm_dialog(&ctx);
         self.result_dialog(&ctx);
         self.toast_ui(&ctx);
     }
 
     /// Warnings, recommendation and results (everything below the header).
-    fn body_ui(&mut self, ui: &mut Ui, layout: Breakpoint) {
+    /// `viewport_h` is the visible height below the header: the stacked
+    /// layouts size the file list to fill what is left of it.
+    fn body_ui(&mut self, ui: &mut Ui, layout: Breakpoint, viewport_h: f32) {
+        let top = ui.cursor().top();
         if let Some(e) = &self.error {
             widgets::error(ui, e);
         }
@@ -705,9 +728,15 @@ impl ScanPage {
                 .filter(|c| c.reason.as_deref().is_some_and(|x| x.contains("running")))
                 .count();
             if running > 0 {
-                widgets::banner(
-                    ui,
-                    &format!(
+                // Short form on phones and short windows, where every line
+                // taken here is a file the list cannot show.
+                let short = layout == Breakpoint::Narrow || viewport_h < 640.0;
+                let text = if short {
+                    format!(
+                        "{running} files are in use by running apps (marked Review). Quit those apps and rescan."
+                    )
+                } else {
+                    format!(
                         "{running} {} to apps that are running, so {} marked Review. Quit those apps and rescan to clean them safely.",
                         if running == 1 {
                             "file belongs"
@@ -715,53 +744,46 @@ impl ScanPage {
                             "files belong"
                         },
                         if running == 1 { "it is" } else { "they are" }
-                    ),
-                    Tone::Review,
-                );
+                    )
+                };
+                widgets::banner(ui, &text, Tone::Review);
             }
         }
 
-        self.recommendation_banner(ui);
+        self.recommendation_banner(ui, layout == Breakpoint::Narrow || viewport_h < 640.0);
 
         if self.report.is_some() {
             ui.add_space(4.0);
             match layout {
                 Breakpoint::Wide => {
+                    // Categories and the file list; file details open in a
+                    // dialog, so the list gets the rest of the width.
                     let h = ui.available_height();
                     ui.horizontal_top(|ui| {
                         ui.allocate_ui_with_layout(
-                            egui::vec2(210.0, h),
+                            egui::vec2(CATEGORIES_W, h),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| self.categories_list(ui),
                         );
-                        let gap = ui.spacing().item_spacing.x;
-                        let center = (ui.available_width() - DETAIL_W - gap).max(320.0);
+                        let center = ui.available_width().max(320.0);
                         ui.allocate_ui_with_layout(
                             egui::vec2(center, h),
                             egui::Layout::top_down(egui::Align::Min),
                             |ui| {
-                                self.filter_row(ui);
+                                self.filter_row(ui, true);
                                 self.table(ui, false);
                             },
-                        );
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(DETAIL_W, h),
-                            egui::Layout::top_down(egui::Align::Min),
-                            |ui| self.detail_card(ui, h),
                         );
                     });
                 }
                 Breakpoint::Medium | Breakpoint::Narrow => {
-                    // Stacked: the page scrolls (see `ui`), and the file list
-                    // gets a fixed share of the window instead of whatever is
-                    // left below the banners and details.
-                    self.category_chips(ui);
-                    self.filter_row(ui);
-                    if self.detail.is_some() {
-                        self.detail_card(ui, DETAIL_STACKED_H);
-                        ui.add_space(6.0);
-                    }
-                    let h = (ui.ctx().content_rect().height() * 0.7).max(320.0);
+                    // Stacked: compact dropdown filters, then the file list
+                    // fills what is left of the window (never less than
+                    // MIN_LIST_H; below that the page scrolls, see `ui`).
+                    self.compact_filters(ui);
+                    self.filter_row(ui, false);
+                    let used = ui.cursor().top() - top;
+                    let h = (viewport_h - used - 4.0).max(MIN_LIST_H);
                     let w = ui.available_width();
                     ui.allocate_ui_with_layout(
                         egui::vec2(w, h),
@@ -948,51 +970,97 @@ impl ScanPage {
         }
     }
 
-    /// Medium/narrow layout: wrapping category chips.
-    fn category_chips(&mut self, ui: &mut Ui) {
+    /// (filter, files matching it) for every safety filter.
+    fn class_counts(&self) -> [(ClassFilter, usize); 5] {
+        let count = |f: ClassFilter| match &self.report {
+            None => 0,
+            Some(r) => r
+                .candidates
+                .iter()
+                .zip(&self.recommended)
+                .filter(|(c, rec)| f.matches(c.class, **rec))
+                .count(),
+        };
+        [
+            ClassFilter::All,
+            ClassFilter::Recommended,
+            ClassFilter::Safe,
+            ClassFilter::Review,
+            ClassFilter::Locked,
+        ]
+        .map(|f| (f, count(f)))
+    }
+
+    /// Medium/narrow layout: category and safety filters as two dropdowns
+    /// on one line instead of several rows of chips.
+    fn compact_filters(&mut self, ui: &mut Ui) {
         let Some(report) = &self.report else { return };
         let summaries = report.by_category();
-        let mut filter = None;
+        let total = report.total_disk_usage();
+        let counts = self.class_counts();
+        let mut category = self.category_filter.clone();
+        let mut class = self.class_filter;
+        // ComboBox width excludes its frame and arrow (~36 px each).
+        let width = ((ui.available_width() - 8.0) / 2.0 - 36.0).clamp(110.0, 260.0);
         ui.horizontal_wrapped(|ui| {
-            if widgets::chip(ui, self.category_filter.is_none(), "All categories").clicked() {
-                filter = Some(None);
-            }
-            for s in &summaries {
-                let active = self.category_filter.as_deref() == Some(s.category.as_str());
-                let label = format!("{} · {}", s.category, format_bytes(s.disk_usage));
-                if widgets::chip(ui, active, &label).clicked() {
-                    filter = Some(if active {
-                        None
-                    } else {
-                        Some(s.category.clone())
-                    });
-                }
-            }
+            let current = match &category {
+                None => format!("All categories · {}", format_bytes(total)),
+                Some(c) => summaries.iter().find(|s| &s.category == c).map_or_else(
+                    || c.clone(),
+                    |s| format!("{} · {}", s.category, format_bytes(s.disk_usage)),
+                ),
+            };
+            egui::ComboBox::from_id_salt((self.id, "category_pick"))
+                .selected_text(current)
+                .width(width)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut category,
+                        None,
+                        format!("All categories · {}", format_bytes(total)),
+                    );
+                    for s in &summaries {
+                        ui.selectable_value(
+                            &mut category,
+                            Some(s.category.clone()),
+                            format!("{} · {}", s.category, format_bytes(s.disk_usage)),
+                        );
+                    }
+                })
+                .response
+                .on_hover_text("Show one category");
+            let label = |f: ClassFilter, n: usize| format!("{}  {} {n}", f.icon(), f.label());
+            let current_n = counts
+                .iter()
+                .find(|(f, _)| *f == class)
+                .map_or(0, |(_, n)| *n);
+            egui::ComboBox::from_id_salt((self.id, "class_pick"))
+                .selected_text(label(class, current_n))
+                .width(width)
+                .show_ui(ui, |ui| {
+                    for (f, n) in counts {
+                        if n > 0 || f == ClassFilter::All {
+                            ui.selectable_value(&mut class, f, label(f, n));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Show files by safety");
         });
-        if let Some(f) = filter {
-            self.set_category_filter(f);
+        if category != self.category_filter {
+            self.set_category_filter(category);
+        }
+        if class != self.class_filter {
+            self.class_filter = class;
+            self.recompute_visible();
         }
     }
 
-    /// Safety filter chips and the search box.
-    fn filter_row(&mut self, ui: &mut Ui) {
+    /// Search box and "select shown"; with `chips`, also the safety filter
+    /// chips (the wide layout, where they fit on one line).
+    fn filter_row(&mut self, ui: &mut Ui, chips: bool) {
+        let counts = self.class_counts();
         let Some(report) = &self.report else { return };
-        let recommended = &self.recommended;
-        let count = |f: ClassFilter| {
-            report
-                .candidates
-                .iter()
-                .zip(recommended)
-                .filter(|(c, r)| f.matches(c.class, **r))
-                .count()
-        };
-        let counts = [
-            (ClassFilter::All, count(ClassFilter::All)),
-            (ClassFilter::Recommended, count(ClassFilter::Recommended)),
-            (ClassFilter::Safe, count(ClassFilter::Safe)),
-            (ClassFilter::Review, count(ClassFilter::Review)),
-            (ClassFilter::Locked, count(ClassFilter::Locked)),
-        ];
         let selectable_shown = self
             .visible
             .iter()
@@ -1003,7 +1071,7 @@ impl ScanPage {
         let mut select_shown = None;
         ui.horizontal_wrapped(|ui| {
             for (f, n) in counts {
-                if n == 0 && f != ClassFilter::All {
+                if !chips || (n == 0 && f != ClassFilter::All) {
                     continue;
                 }
                 if widgets::chip(
@@ -1168,59 +1236,69 @@ impl ScanPage {
                 }
             });
         if let Some(i) = clicked {
-            self.detail = if self.detail == Some(i) {
-                None
-            } else {
-                Some(i)
-            };
+            self.detail = Some(i);
+            self.live = None;
         }
     }
 
-    /// Details of the clicked file, including *why* it has its class.
+    /// File details as a dialog over the list (every layout), so the list
+    /// keeps the full width. Closed with ×, Escape or a click outside.
+    fn detail_dialog(&mut self, ctx: &egui::Context) {
+        // One dialog at a time: the confirmation and result take priority.
+        if self.detail.is_none() || self.confirm.is_some() || self.result.is_some() {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let width = (screen.width() - 32.0).clamp(300.0, 560.0);
+        let max_h = (screen.height() * 0.85 - 48.0).max(240.0);
+        let modal = Modal::new(Id::new((self.id, "detail_modal"))).show(ctx, |ui| {
+            ui.set_width(width);
+            self.detail_card(ui, max_h);
+        });
+        if modal.should_close() {
+            self.detail = None;
+            self.live = None;
+        }
+    }
+
+    /// The file shown `step` places before/after the open one in the
+    /// current (filtered) list.
+    fn neighbour(&self, step: isize) -> Option<usize> {
+        let pos = self.visible.iter().position(|&i| Some(i) == self.detail)?;
+        let next = pos.checked_add_signed(step)?;
+        self.visible.get(next).copied()
+    }
+
+    /// Details of the clicked file, including *why* it has its class, shown
+    /// inside the detail dialog.
     ///
-    /// `max_h` bounds the card: the header (name, safety, recommendation and
-    /// actions) is always visible and the rest scrolls, so the card can never
-    /// push the file list off screen or cover the action bar.
+    /// `max_h` bounds the content: the header (name, safety, selection and
+    /// actions) and the footer are always visible and the rest scrolls.
     fn detail_card(&mut self, ui: &mut Ui, max_h: f32) {
         use egui_phosphor::regular as icon;
         let p = palette(ui);
+        let Some(idx) = self.detail else { return };
         let Some(report) = &self.report else { return };
-        let c = self.detail.and_then(|i| report.candidates.get(i));
-        if let Some(c) = c
-            && self.live.as_ref().is_none_or(|l| l.path != c.path)
-        {
+        let Some(c) = report.candidates.get(idx) else {
+            return;
+        };
+        if self.live.as_ref().is_none_or(|l| l.path != c.path) {
             self.live = Some(LiveInfo::read(c));
         }
-        let live = self
-            .live
-            .as_ref()
-            .filter(|l| c.is_some_and(|c| c.path == l.path));
+        let live = self.live.as_ref().filter(|l| l.path == c.path);
         let method = self.method;
         let id = self.id;
         let home = self.home.as_path();
+        let is_selected = self.selected.get(idx).copied().unwrap_or(false);
+        let (prev, next) = (self.neighbour(-1), self.neighbour(1));
+        let position = self.visible.iter().position(|&i| i == idx);
+        let shown = self.visible.len();
         let mut close = false;
         let mut refresh = false;
-        theme::card(ui)
-            .inner_margin(egui::Margin::same(14))
-            .show(ui, |ui| {
+        let mut toggle = false;
+        let mut go = None;
+        egui::Frame::new().show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                let Some(c) = c else {
-                    ui.label(
-                        RichText::new(format!("{}  Details", icon::INFO))
-                            .strong()
-                            .size(15.0),
-                    );
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(
-                                "Click a file to see what it is, where it lives and whether it is safe to delete.",
-                            )
-                            .color(p.muted),
-                        )
-                        .wrap(),
-                    );
-                    return;
-                };
                 let top = ui.cursor().top();
 
                 // Header: name + close, then safety and actions.
@@ -1261,6 +1339,35 @@ impl ScanPage {
                     ui.label(RichText::new(format_bytes(c.disk_usage)).strong());
                 });
                 ui.horizontal_wrapped(|ui| {
+                    if c.class.is_selectable() {
+                        let label = if is_selected {
+                            format!("{}  Selected for cleanup", icon::CHECK_SQUARE)
+                        } else {
+                            format!("{}  Select for cleanup", icon::SQUARE)
+                        };
+                        let button = if is_selected {
+                            Button::new(RichText::new(label).color(p.accent))
+                                .fill(p.accent_soft)
+                        } else {
+                            Button::new(label)
+                        };
+                        if ui
+                            .add(button)
+                            .on_hover_text(if is_selected {
+                                "Click to keep this file (unselect it)"
+                            } else {
+                                "Adds this file to the selection; you still confirm before anything moves"
+                            })
+                            .clicked()
+                        {
+                            toggle = true;
+                        }
+                    } else {
+                        ui.add_enabled(
+                            false,
+                            Button::new(format!("{}  Cannot be removed", icon::LOCK_SIMPLE)),
+                        );
+                    }
                     if ui
                         .small_button(format!("{}  {}", icon::FOLDER_OPEN, widgets::reveal_label()))
                         .clicked()
@@ -1283,10 +1390,12 @@ impl ScanPage {
                 });
                 ui.separator();
 
+                // Room for the footer (previous / next) below the scroll area.
+                let footer_h = ui.spacing().interact_size.y + 20.0;
                 let used = ui.cursor().top() - top;
                 ScrollArea::vertical()
                     .id_salt((id, "detail_scroll"))
-                    .max_height((max_h - used - 40.0).max(80.0))
+                    .max_height((max_h - used - footer_h).max(80.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         let why = c.reason.clone().unwrap_or_else(|| match c.class {
@@ -1366,9 +1475,10 @@ impl ScanPage {
                                     ui,
                                     "Removal",
                                     match method {
-                                        RemovalMethod::Trash => {
-                                            "Moved to the Trash (restorable)".into()
-                                        }
+                                        RemovalMethod::Trash => format!(
+                                            "Moved to the {} (restorable)",
+                                            widgets::trash_name()
+                                        ),
                                         RemovalMethod::Quarantine => {
                                             "Moved to RustClean quarantine (restorable)".into()
                                         }
@@ -1398,7 +1508,41 @@ impl ScanPage {
                             egui::Label::new(RichText::new(impact).small().color(p.muted)).wrap(),
                         );
                     });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(prev.is_some(), Button::new(format!("{}  Previous", icon::CARET_LEFT)))
+                        .clicked()
+                    {
+                        go = prev;
+                    }
+                    if ui
+                        .add_enabled(next.is_some(), Button::new(format!("Next  {}", icon::CARET_RIGHT)))
+                        .clicked()
+                    {
+                        go = next;
+                    }
+                    if let Some(pos) = position {
+                        ui.label(
+                            RichText::new(format!("{} of {shown}", pos + 1))
+                                .small()
+                                .color(p.muted),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Done").clicked() {
+                            close = true;
+                        }
+                    });
+                });
             });
+        if toggle && let Some(s) = self.selected.get_mut(idx) {
+            *s = !*s;
+        }
+        if let Some(i) = go {
+            self.detail = Some(i);
+            self.live = None;
+        }
         if close {
             self.detail = None;
         }
@@ -1430,16 +1574,17 @@ impl ScanPage {
                 .add_enabled(n > 0 && !busy, theme::primary_button(ui, &label))
                 .clicked();
             egui::ComboBox::from_id_salt((id, "removal_method"))
-                .selected_text(RichText::new(method.label()).color(p.text))
+                .selected_text(RichText::new(widgets::method_label(*method)).color(p.text))
                 .show_ui(ui, |ui| {
                     for m in [RemovalMethod::Trash, RemovalMethod::Quarantine] {
-                        ui.selectable_value(method, m, m.label());
+                        ui.selectable_value(method, m, widgets::method_label(m));
                     }
                 })
                 .response
-                .on_hover_text(
-                    "Both are reversible: restore from the Trash, or from Quarantine in RustClean.",
-                );
+                .on_hover_text(format!(
+                    "Both are reversible: restore from the {}, or from Quarantine in RustClean.",
+                    widgets::trash_name()
+                ));
         });
         if select_safe && let Some(r) = &self.report {
             for (c, s) in r.candidates.iter().zip(self.selected.iter_mut()) {
@@ -1507,9 +1652,10 @@ impl ScanPage {
         let modal = Modal::new(Id::new((id, "confirm"))).show(ctx, |ui| {
             ui.set_width(width);
             let p = crate::theme::palette(ui);
+            let trash = widgets::trash_name();
             let verb = match plan.method {
-                RemovalMethod::Trash => "move to the Trash",
-                RemovalMethod::Quarantine => "move to RustClean quarantine",
+                RemovalMethod::Trash => format!("move to the {trash}"),
+                RemovalMethod::Quarantine => "move to RustClean quarantine".to_string(),
             };
             ui.label(
                 RichText::new(format!(
@@ -1524,8 +1670,8 @@ impl ScanPage {
                 RichText::new(format!(
                     "RustClean will check each file again, then {verb}. You can undo this: {}",
                     match plan.method {
-                        RemovalMethod::Trash => "put files back from the Trash. Space is freed when you empty the Trash.",
-                        RemovalMethod::Quarantine => "restore from Quarantine in RustClean.",
+                        RemovalMethod::Trash => format!("put files back from the {trash}. Disk space is freed only when you empty the {trash}."),
+                        RemovalMethod::Quarantine => "restore from Quarantine in RustClean.".to_string(),
                     }
                 ))
                 .color(p.muted),
@@ -1657,7 +1803,11 @@ impl ScanPage {
                     action = Some(ConfirmAction::Simulate);
                 }
                 let label = match state.plan.method {
-                    RemovalMethod::Trash => format!("Move {} files to Trash", state.plan.items().len()),
+                    RemovalMethod::Trash => format!(
+                        "Move {} files to {}",
+                        state.plan.items().len(),
+                        widgets::trash_name()
+                    ),
                     RemovalMethod::Quarantine => {
                         format!("Quarantine {} files", state.plan.items().len())
                     }
@@ -1771,14 +1921,15 @@ impl ScanPage {
                         r.removed(),
                         format_bytes(r.bytes_affected()),
                         match r.method {
-                            RemovalMethod::Trash => "moved to Trash",
-                            RemovalMethod::Quarantine => "moved to quarantine",
+                            RemovalMethod::Trash => format!("moved to {}", widgets::trash_name()),
+                            RemovalMethod::Quarantine => "moved to quarantine".to_string(),
                         }
                     ))
                     .strong(),
                 );
                 if r.method == RemovalMethod::Trash {
-                    ui.label(RichText::new("Empty the Trash to reclaim the space. Files can be recovered from the Trash until then.").weak());
+                    let trash = widgets::trash_name();
+                    ui.label(RichText::new(format!("Disk space is freed when you empty the {trash}. Files can be recovered from the {trash} until then.")).weak());
                 }
             }
             if let Some(dir) = &outcome.quarantine_dir {
@@ -1989,6 +2140,22 @@ mod tests {
         // Alignment survives a cleanup.
         p.forget_removed(&removed_report(&["b"]));
         assert_eq!(p.recommended, vec![true, false, false]);
+    }
+
+    #[test]
+    fn detail_dialog_steps_through_the_filtered_list_only() {
+        let mut p = page();
+        p.set_category_filter(Some("A".into())); // a, b, c
+        p.detail = Some(0);
+        assert_eq!(p.neighbour(-1), None);
+        assert_eq!(p.neighbour(1), Some(1));
+        p.detail = Some(2);
+        // "d" is in another category: never reached from here.
+        assert_eq!(p.neighbour(1), None);
+        // A file hidden by a filter change closes the dialog.
+        p.set_category_filter(Some("B".into()));
+        assert_eq!(p.detail, None);
+        assert_eq!(p.neighbour(1), None);
     }
 
     #[test]

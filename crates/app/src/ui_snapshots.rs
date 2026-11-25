@@ -18,7 +18,14 @@ use egui_kittest::Harness;
 use crate::app::RustCleanApp;
 use crate::navigation::Page;
 
-const WIDTHS: [(f32, f32); 3] = [(1280.0, 860.0), (900.0, 860.0), (390.0, 844.0)];
+/// Desktop, tablet and phone, plus a common Windows laptop: 1366×768 at 125 %
+/// scaling leaves about 1093×614 points (saved as `-1093`).
+const WIDTHS: [(f32, f32); 4] = [
+    (1280.0, 860.0),
+    (900.0, 860.0),
+    (390.0, 844.0),
+    (1093.0, 614.0),
+];
 
 fn write(path: &Path, bytes: usize) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -92,7 +99,7 @@ fn docker_fixture() -> rustclean_containers::DockerReport {
             {"Name": "pgdata", "Driver": "local", "UsageData": {"Size": 900000000, "RefCount": 1}}
         ]},
         "BuildCacheUsage": {"TotalCount": 36, "Reclaimable": 488700000, "TotalSize": 2630000000u64, "Items": [
-            {"ID": "b1", "InUse": false, "Size": 488700000}
+            {"ID": "b1", "InUse": false, "Shared": false, "Size": 488700000}
         ]}
     });
     let (items, totals) = rustclean_containers::classify_usage(&usage, false);
@@ -158,6 +165,7 @@ fn ui_snapshots() {
             s.browser.start_scan(&ctx);
             s.developer.start_scan(&ctx);
             s.security.start_scan(&ctx);
+            s.antivirus.start_check(&ctx);
             s.docker.set_report_for_test(docker_fixture());
         }
         wait_idle(&mut harness);
@@ -174,6 +182,21 @@ fn ui_snapshots() {
             .junk
             .select_for_test(3);
         shoot(&mut harness, &out, "junk", w);
+        harness
+            .state_mut()
+            .state
+            .as_mut()
+            .unwrap()
+            .junk
+            .detail_for_test(true);
+        shoot(&mut harness, &out, "junk-detail", w);
+        harness
+            .state_mut()
+            .state
+            .as_mut()
+            .unwrap()
+            .junk
+            .detail_for_test(false);
 
         harness.state_mut().page = Page::AppCaches;
         {
@@ -205,6 +228,9 @@ fn ui_snapshots() {
 
         harness.state_mut().page = Page::SecurityCenter;
         shoot(&mut harness, &out, "security", w);
+
+        harness.state_mut().page = Page::Antivirus;
+        shoot(&mut harness, &out, "antivirus", w);
 
         harness.state_mut().page = Page::Docker;
         harness

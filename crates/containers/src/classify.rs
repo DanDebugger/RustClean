@@ -254,17 +254,25 @@ pub fn classify_usage(
     }
 
     let build_items = items(usage, "BuildCacheUsage");
+    // Only records that are neither in use nor shared with other builds are
+    // freed by a prune (Docker's own "reclaimable" rule). A missing flag is
+    // treated as "in use"/"shared": offering space that will not be freed
+    // is worse than offering none.
+    let flag = |b: &Value, k: &str| b.get(k).and_then(Value::as_bool).unwrap_or(true);
     let unused: Vec<&Value> = build_items
         .iter()
-        .filter(|b| !b.get("InUse").and_then(Value::as_bool).unwrap_or(true))
+        .filter(|b| !flag(b, "InUse") && !flag(b, "Shared"))
         .collect();
-    let build_totals = totals(usage, "BuildCacheUsage");
-    // Prefer Docker's estimate (accounts for shared records).
-    let unused_size = if build_totals.reclaimable > 0 {
-        build_totals.reclaimable
-    } else {
-        unused.iter().map(|b| bytes(n(b, "Size"))).sum()
-    };
+    let mut build_totals = totals(usage, "BuildCacheUsage");
+    // Docker's estimate when it sends one (some engines omit the field,
+    // which must not read as 0 *or* fall back to all unused records).
+    let reported = usage
+        .get("BuildCacheUsage")
+        .and_then(|u| u.get("Reclaimable"))
+        .and_then(Value::as_i64)
+        .map(bytes);
+    let unused_size = reported.unwrap_or_else(|| unused.iter().map(|b| bytes(n(b, "Size"))).sum());
+    build_totals.reclaimable = unused_size;
     if !unused.is_empty() && unused_size > 0 {
         out.push(DockerItem {
             kind: ItemKind::BuildCache,
@@ -312,9 +320,9 @@ mod tests {
                 {"Name": "nodata", "Driver": "local"}
             ]},
             "BuildCacheUsage": {"Reclaimable": 800, "TotalCount": 3, "Items": [
-                {"ID": "b1", "InUse": false, "Size": 500},
-                {"ID": "b2", "InUse": false, "Size": 400},
-                {"ID": "b3", "InUse": true, "Size": 100}
+                {"ID": "b1", "InUse": false, "Shared": false, "Size": 500},
+                {"ID": "b2", "InUse": false, "Shared": false, "Size": 400},
+                {"ID": "b3", "InUse": true, "Shared": false, "Size": 100}
             ]}
         })
     }
@@ -362,6 +370,36 @@ mod tests {
         assert_eq!(find(&items, "orphan").class, SafetyClass::Review);
         assert_eq!(find(&items, "pgdata").class, SafetyClass::Protected);
         assert_eq!(find(&items, "nodata").class, SafetyClass::Protected);
+    }
+
+    /// Seen on a real OrbStack engine: every record unused but shared, and
+    /// no `Reclaimable` field. Docker frees nothing; nothing is offered.
+    #[test]
+    fn shared_build_cache_is_not_offered() {
+        let usage = json!({"BuildCacheUsage": {"TotalCount": 2, "TotalSize": 900, "Items": [
+            {"ID": "s1", "InUse": false, "Shared": true, "Size": 500},
+            {"ID": "s2", "InUse": false, "Shared": true, "Size": 400}
+        ]}});
+        let (items, totals) = classify_usage(&usage, false);
+        assert!(items.iter().all(|i| i.kind != ItemKind::BuildCache));
+        assert_eq!(totals[&ItemKind::BuildCache].reclaimable, 0);
+    }
+
+    /// Without `Reclaimable`, only unused *and* unshared records count; a
+    /// record with no `Shared` flag is treated as shared.
+    #[test]
+    fn build_cache_size_without_docker_estimate() {
+        let usage = json!({"BuildCacheUsage": {"Items": [
+            {"ID": "a", "InUse": false, "Shared": false, "Size": 300},
+            {"ID": "b", "InUse": false, "Shared": true, "Size": 200},
+            {"ID": "c", "InUse": true, "Shared": false, "Size": 100},
+            {"ID": "d", "InUse": false, "Size": 50}
+        ]}});
+        let (items, totals) = classify_usage(&usage, false);
+        let build = find(&items, "unused");
+        assert_eq!(build.size, 300);
+        assert_eq!(build.detail, "1 of 4 records");
+        assert_eq!(totals[&ItemKind::BuildCache].reclaimable, 300);
     }
 
     #[test]

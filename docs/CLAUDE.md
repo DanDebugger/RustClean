@@ -80,7 +80,7 @@ Before shipping a new location or rule, run the matching read-only example
 | `crates/duplicates` | Duplicate Finder (size → partial → full BLAKE3) |
 | `crates/apps` | Installed-app detection, App Leftovers (+ `SensitiveClassifier`) |
 | `crates/containers` | Docker via `bollard`; Tokio stays inside this crate |
-| `crates/security` | Read-only persistence audit (LaunchAgents, autostart, Startup folder) |
+| `crates/security` | Read-only persistence audit (LaunchAgents, autostart, Startup folder) and protection status (Gatekeeper, Defender, ClamAV) |
 | `crates/app` | The `rustclean` binary: egui UI, pages, theme, widgets, screenshot tests |
 | `scripts/release.sh` | Builds `dist/` packages (macOS `.dmg`, Windows `.zip`) |
 
@@ -109,6 +109,7 @@ cargo run -p rustclean-apps --example leftovers
 cargo run --release -p rustclean-duplicates --example find_dupes
 cargo run -p rustclean-containers --example docker_dry_run
 cargo run -p rustclean-security --example persistence_audit
+cargo run -p rustclean-security --example protection_status
 
 # Real end-to-end Trash check: moves ONE file it creates itself to your Trash
 cargo run -p rustclean-core --example trash_e2e
@@ -149,21 +150,29 @@ and only after raising `rust-version`. Windows release builds need
   and dark palettes.
 - **Use the shared widgets** (`widgets.rs`): `pill`/`class_pill` (always
   colour *and* text), `banner`, `callout`, `chip`, `card_grid`,
-  `header_with_action`, `action_bar`, `toast`, `short_path`.
+  `header_with_action`, `action_bar`, `toast`, `short_path`, `trash_name`
+  / `method_label`, `reveal_label`.
 - **Responsive layout is required.** Breakpoints on *content* width:
-  - ≥ 960 px: three columns
-  - 640–960 px: detail panel above the table
-  - < 640 px: stacked cards
+  - ≥ 960 px: categories list + file table
+  - 640–960 px: category/safety dropdowns, table fills the remaining height
+  - < 640 px: dropdowns, stacked cards
 
-  Below an 860 px window the sidebar becomes a page picker. Use `card_grid`
-  for card rows; `ui.columns` misbehaved at one column (a card disappeared).
-  Wrap long text (`Label::wrap`) and use `horizontal_wrapped` for button
-  rows.
+  File details are a dialog (`Modal`) in every layout, never a panel that
+  takes list space. Height matters too: the file list gets what is left of
+  the window (min `MIN_LIST_H`), and windows under 640 px tall get one-line
+  banners. Below an 860 px window the sidebar becomes a page picker. Use
+  `card_grid` for card rows; `ui.columns` misbehaved at one column (a card
+  disappeared). Wrap long text (`Label::wrap`), truncate single-line labels
+  next to a value, and use `horizontal_wrapped` for button rows.
+- **Name things the way the OS does.** Never hard-code "Trash" or "Finder":
+  use `widgets::trash_name()` ("Recycle Bin" on Windows), `method_label`
+  and `reveal_label`.
 - **Plain language.** Say what will happen ("Move 12 files to Trash"), say
   that it's reversible, and explain every Review/Protected label.
-- **Any visible UI change:** re-render the screenshots and look at all three
-  widths before calling it done. Test-only hooks live behind `#[cfg(test)]`
-  (e.g. `select_for_test`, `set_report_for_test`).
+- **Any visible UI change:** re-render the screenshots and look at all four
+  sizes (1280, 900, 390 and 1093×614, a 1366×768 Windows laptop at 125 %)
+  before calling it done. Test-only hooks live behind `#[cfg(test)]`
+  (e.g. `select_for_test`, `detail_for_test`, `set_report_for_test`).
 
 ## Testing
 

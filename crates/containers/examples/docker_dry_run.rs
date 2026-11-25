@@ -44,7 +44,15 @@ fn main() {
         "selectable (Safe+Review): {}",
         format_bytes(report.reclaimable())
     );
-    let safe = report.items.iter().filter(|i| i.class == SafetyClass::Safe);
+    let safe: Vec<_> = report
+        .items
+        .iter()
+        .filter(|i| i.class == SafetyClass::Safe)
+        .collect();
+    if safe.is_empty() {
+        println!("nothing is Safe to remove; no dry run needed");
+        return;
+    }
     let plan = DockerPlan::from_selection(safe, true)
         .approve(false, false)
         .expect("approve dry run");

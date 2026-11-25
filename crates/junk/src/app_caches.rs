@@ -13,7 +13,11 @@
 //!   `Preferences` marker, so arbitrary folders named "Cache" are ignored.
 //!
 //! On Linux `~/.cache/<app>` and `~/.config/<App>/<chromium cache>` are used.
-//! Windows is not supported: `%LOCALAPPDATA%` mixes caches with app data.
+//!
+//! On Windows only the Electron/Chromium rule applies, to
+//! `%APPDATA%\<App>\{Cache, Code Cache, GPUCache, …}` (Electron's default
+//! user-data folder). `%LOCALAPPDATA%` is never scanned here, because it
+//! mixes caches with app data and nothing there identifies a cache safely.
 //!
 //! Rules are those of the Junk Cleaner: Apple caches, developer-tool caches
 //! and Chrome are excluded; only reverse-DNS, updater and Chromium caches
@@ -65,6 +69,68 @@ const SKIPPED_APP_DATA: &[&str] = &[
     "RustClean",
     "rustclean",
 ];
+
+/// Extra Windows folders under `%APPDATA%`: browsers and vendor folders whose
+/// caches belong to another module or are not ours to judge. (Chrome keeps
+/// its data in `%LOCALAPPDATA%\Google\Chrome`, which is not scanned here;
+/// the entry is defensive.)
+const WINDOWS_SKIPPED_APP_DATA: &[&str] = &[
+    "Microsoft",
+    "Mozilla",
+    "Opera Software",
+    "Opera",
+    "Brave-Browser",
+];
+
+/// Which cache sources apply on an OS. A pure function so the Windows
+/// decision is testable on every platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sources {
+    /// `platform::user_cache_dir` folders (`~/Library/Caches`, `~/.cache`).
+    user_caches: bool,
+    /// Sandboxed app containers (macOS only).
+    containers: bool,
+    /// Chromium disk caches inside the app-data folder.
+    chromium: bool,
+}
+
+fn sources_for(os: Os) -> Sources {
+    match os {
+        Os::MacOs => Sources {
+            user_caches: true,
+            containers: true,
+            chromium: true,
+        },
+        Os::Linux => Sources {
+            user_caches: true,
+            containers: false,
+            chromium: true,
+        },
+        // `%LOCALAPPDATA%` (the Windows user cache dir) mixes caches with app
+        // data, so only Electron/Chromium caches in `%APPDATA%` are offered.
+        Os::Windows => Sources {
+            user_caches: false,
+            containers: false,
+            chromium: true,
+        },
+        Os::Other => Sources {
+            user_caches: false,
+            containers: false,
+            chromium: false,
+        },
+    }
+}
+
+fn is_skipped_app_data(os: Os, name: &str) -> bool {
+    SKIPPED_APP_DATA
+        .iter()
+        .chain(if os == Os::Windows {
+            WINDOWS_SKIPPED_APP_DATA
+        } else {
+            &[]
+        })
+        .any(|s| s.eq_ignore_ascii_case(name))
+}
 
 /// Where a cache folder was found; shown as the file's "Source".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,27 +275,27 @@ impl AppCachesModule {
         Self { home, apps }
     }
 
+    /// Where apps keep their user data: `~/Library/Application Support`,
+    /// `$XDG_CONFIG_HOME` or `%APPDATA%` (Electron's default `userData`).
     fn app_data_root(&self) -> Option<PathBuf> {
-        match platform::CURRENT {
-            Os::MacOs => Some(self.home.join("Library/Application Support")),
-            Os::Linux => Some(
-                std::env::var_os("XDG_CONFIG_HOME")
-                    .map(PathBuf::from)
-                    .filter(|p| p.is_absolute())
-                    .unwrap_or_else(|| self.home.join(".config")),
-            ),
-            _ => None,
-        }
+        sources_for(platform::CURRENT)
+            .chromium
+            .then(|| platform::roaming_app_data(&self.home))
     }
 
     /// Builds the scan spec using the given running-app snapshot.
     pub fn prepare_scan_with(&self, running: RunningApps) -> ScanSpec {
         let mut found = Vec::new();
-        self.user_cache_targets(&mut found);
-        if platform::CURRENT == Os::MacOs {
+        let sources = sources_for(platform::CURRENT);
+        if sources.user_caches {
+            self.user_cache_targets(&mut found);
+        }
+        if sources.containers {
             self.container_targets(&mut found);
         }
-        self.chromium_targets(&mut found);
+        if let Some(root) = self.app_data_root() {
+            self.chromium_targets(&root, platform::CURRENT, &mut found);
+        }
         found.sort_by(|a, b| {
             a.app
                 .to_lowercase()
@@ -339,16 +405,28 @@ impl AppCachesModule {
         }
     }
 
-    fn chromium_targets(&self, out: &mut Vec<Found>) {
-        let Some(root) = self.app_data_root() else {
-            return;
-        };
-        for name in dir_names(&root) {
-            if SKIPPED_APP_DATA.contains(&name.as_str()) || is_apple_cache(&name) {
+    /// Chromium disk caches of Electron apps under `root`.
+    ///
+    /// Partial-deletion rule: Chromium treats these folders purely as a
+    /// disk cache and rebuilds the index and entries on demand, so removing
+    /// any subset of their files is harmless (the same assumption already
+    /// holds on macOS and Linux). Only the cache folders in
+    /// `CHROMIUM_CACHE_DIRS` are listed, never cookies, IndexedDB or storage.
+    fn chromium_targets(&self, root: &Path, os: Os, out: &mut Vec<Found>) {
+        for name in dir_names(root) {
+            if is_skipped_app_data(os, &name) || is_apple_cache(&name) {
                 continue;
             }
             let app_dir = root.join(&name);
-            let is_chromium = CHROMIUM_MARKERS
+            // Windows: `Local State` only. `%APPDATA%` holds many non-Electron
+            // apps, and a bare `Preferences` file is too generic to identify
+            // Chromium there; Electron always writes `Local State`.
+            let markers: &[&str] = if os == Os::Windows {
+                &["Local State"]
+            } else {
+                CHROMIUM_MARKERS
+            };
+            let is_chromium = markers
                 .iter()
                 .any(|m| fs::symlink_metadata(app_dir.join(m)).is_ok_and(|md| md.is_file()));
             if !is_chromium {
@@ -427,7 +505,8 @@ impl CleanupModule for AppCachesModule {
     }
 
     fn is_available(&self) -> bool {
-        matches!(platform::CURRENT, Os::MacOs | Os::Linux)
+        let s = sources_for(platform::CURRENT);
+        s.user_caches || s.chromium
     }
 
     fn details(&self) -> Vec<(String, String)> {
@@ -436,6 +515,7 @@ impl CleanupModule for AppCachesModule {
                 "~/Library/Caches, sandboxed app containers (~/Library/Containers/…/Caches), Electron app caches in ~/Library/Application Support"
             }
             Os::Linux => "~/.cache, Electron app caches in ~/.config",
+            Os::Windows => "Electron app caches in %APPDATA%",
             _ => "Not supported on this platform",
         };
         vec![
@@ -446,11 +526,23 @@ impl CleanupModule for AppCachesModule {
 
     fn notes(&self) -> Vec<String> {
         let mut notes = vec![
-            "Tick an app in the list to clear its whole cache; apps rebuild caches when needed.".into(),
-            "Caches of running apps are marked Review: quit the app first for a clean result.".into(),
+            "Tick an app in the list to clear its whole cache; apps rebuild caches when needed."
+                .into(),
+            "Caches of running apps are marked Review: quit the app first for a clean result."
+                .into(),
             "Apple, browser and developer-tool caches are not listed here.".into(),
-            "~/Library/Caches folders also appear in Junk Cleaner (grouped by type); cleaning in either place is the same.".into(),
         ];
+        if platform::CURRENT == Os::Windows {
+            notes.push(
+                "Only Electron/Chromium caches are listed. Other caches in %LOCALAPPDATA% are not, because that folder mixes caches with app data."
+                    .into(),
+            );
+        } else {
+            notes.push(
+                "~/Library/Caches folders also appear in Junk Cleaner (grouped by type); cleaning in either place is the same."
+                    .into(),
+            );
+        }
         if platform::CURRENT == Os::MacOs {
             notes.push(
                 "macOS may ask once for permission to read other apps' containers; declining only hides those caches."
@@ -497,6 +589,127 @@ mod tests {
         assert_eq!(idx.resolve("com.example.NotesApp").0, "NotesApp");
         assert_eq!(idx.resolve("JNA").0, "JNA");
         assert_eq!(idx.resolve("GoogleUpdater").0, "GoogleUpdater");
+    }
+
+    fn touch(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"x").unwrap();
+    }
+
+    fn roots(found: &[Found]) -> Vec<PathBuf> {
+        found.iter().map(|f| f.target.root.clone()).collect()
+    }
+
+    /// Fake `%APPDATA%`, canonicalised (macOS temp dirs are symlinked).
+    fn roaming_fixture() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(tmp.path()).unwrap().join("Roaming");
+        touch(&root.join("Slack/Local State"));
+        touch(&root.join("Slack/Cache/Cache_Data/f_0001"));
+        touch(&root.join("Slack/Code Cache/js/a"));
+        touch(&root.join("Slack/IndexedDB/x"));
+        touch(&root.join("discord/Local State"));
+        touch(&root.join("discord/GPUCache/data_0"));
+        // Windows: a bare `Preferences` file does not identify Chromium.
+        touch(&root.join("PrefsOnly/Preferences"));
+        touch(&root.join("PrefsOnly/Cache/settings.dat"));
+        touch(&root.join("Code/Local State"));
+        touch(&root.join("Code/Cache/f"));
+        // No marker: a folder called "Cache" is not enough.
+        touch(&root.join("SomeTool/Cache/important.dat"));
+        // Skipped vendor/browser folders, even with markers.
+        for skipped in [
+            "Microsoft",
+            "Mozilla",
+            "Opera Software",
+            "Google",
+            "RustClean",
+        ] {
+            touch(&root.join(skipped).join("Local State"));
+            touch(&root.join(skipped).join("Cache/f"));
+        }
+        touch(&root.join("loose-file"));
+        (tmp, root)
+    }
+
+    #[test]
+    fn windows_finds_electron_caches_only() {
+        let (_tmp, root) = roaming_fixture();
+        let m = AppCachesModule::with_apps(root.clone(), AppIndex::default());
+        let mut found = Vec::new();
+        m.chromium_targets(&root, Os::Windows, &mut found);
+        let mut got = roots(&found);
+        got.sort();
+        let mut want = vec![
+            root.join("Slack/Cache"),
+            root.join("Slack/Code Cache"),
+            root.join("discord/GPUCache"),
+            root.join("Code/Cache"),
+        ];
+        want.sort();
+        assert_eq!(got, want);
+        assert!(
+            found
+                .iter()
+                .all(|f| f.target.default_class == SafetyClass::Safe)
+        );
+        let slack = found.iter().find(|f| f.app == "Slack").unwrap();
+        assert_eq!(slack.owner_keys, vec!["Slack".to_string()]);
+    }
+
+    #[test]
+    fn windows_skip_list_is_case_insensitive_and_windows_only() {
+        assert!(is_skipped_app_data(Os::Windows, "microsoft"));
+        assert!(is_skipped_app_data(Os::Windows, "Opera Software"));
+        assert!(is_skipped_app_data(Os::Windows, "Google"));
+        assert!(!is_skipped_app_data(Os::Windows, "Slack"));
+        // macOS behaviour is unchanged: "Microsoft" is not skipped there.
+        assert!(!is_skipped_app_data(Os::MacOs, "Microsoft"));
+        assert!(is_skipped_app_data(Os::MacOs, "Google"));
+    }
+
+    #[test]
+    fn windows_never_scans_the_user_cache_dir() {
+        let w = sources_for(Os::Windows);
+        assert!(!w.user_caches);
+        assert!(!w.containers);
+        assert!(w.chromium);
+        assert!(sources_for(Os::MacOs).user_caches && sources_for(Os::MacOs).containers);
+        assert!(sources_for(Os::Linux).user_caches && !sources_for(Os::Linux).containers);
+        assert_eq!(
+            sources_for(Os::Other),
+            Sources {
+                user_caches: false,
+                containers: false,
+                chromium: false
+            }
+        );
+    }
+
+    #[test]
+    fn running_windows_app_raises_cache_to_review() {
+        let (_tmp, root) = roaming_fixture();
+        let m = AppCachesModule::with_apps(root.clone(), AppIndex::default());
+        let mut found = Vec::new();
+        m.chromium_targets(&root, Os::Windows, &mut found);
+        let owners: HashMap<PathBuf, Vec<String>> = found
+            .iter()
+            .map(|f| (f.target.root.clone(), f.owner_keys.clone()))
+            .collect();
+        let c = AppCacheClassifier {
+            running: RunningApps::from_parts(&[], &["Slack.exe", "Discord.exe"]),
+            owners,
+        };
+        let class_of = |dir: &str| {
+            let t = found
+                .iter()
+                .find(|f| f.target.root == root.join(dir))
+                .unwrap();
+            c.classify(&t.target.root, false, &t.target).class
+        };
+        assert_eq!(class_of("Slack/Cache"), SafetyClass::Review);
+        assert_eq!(class_of("discord/GPUCache"), SafetyClass::Review);
+        assert_eq!(class_of("Code/Cache"), SafetyClass::Safe);
     }
 
     #[test]

@@ -123,14 +123,30 @@ fn visuals(p: &Palette, dark: bool) -> Visuals {
     v
 }
 
-/// Fonts: the macOS system font when available (read from the OS at
-/// runtime, never bundled), egui's default otherwise, plus Phosphor icons.
+/// The platform's UI font, if it has a known location: SF on macOS,
+/// Segoe UI on Windows. Read from the OS at runtime, never bundled.
+fn system_font_path() -> Option<std::path::PathBuf> {
+    if cfg!(target_os = "macos") {
+        Some("/System/Library/Fonts/SFNS.ttf".into())
+    } else if cfg!(windows) {
+        let root = std::env::var_os("SystemRoot")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| r"C:\Windows".into());
+        Some(root.join("Fonts").join("segoeui.ttf"))
+    } else {
+        None
+    }
+}
+
+/// Fonts: the system UI font when available, egui's default otherwise (also
+/// the fallback for glyphs the system font lacks), plus Phosphor icons.
 fn install_fonts(ctx: &egui::Context) {
     use egui::{FontData, FontDefinitions, FontFamily};
     let mut fonts = FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
-    if cfg!(target_os = "macos")
-        && let Ok(bytes) = std::fs::read("/System/Library/Fonts/SFNS.ttf")
+    if let Some(path) = system_font_path()
+        && let Ok(bytes) = std::fs::read(path)
     {
         fonts.font_data.insert(
             "system".into(),

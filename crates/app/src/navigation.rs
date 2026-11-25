@@ -15,6 +15,8 @@ pub enum Page {
     DeveloperCleaner,
     Docker,
     SecurityCenter,
+    Antivirus,
+    BackupSync,
     StorageAnalyzer,
     DuplicateFinder,
     LargeFiles,
@@ -37,7 +39,10 @@ const SECTIONS: &[(&str, &[Page])] = &[
             Page::AppCleaner,
         ],
     ),
-    ("SECURITY", &[Page::SecurityCenter]),
+    (
+        "SECURITY",
+        &[Page::SecurityCenter, Page::Antivirus, Page::BackupSync],
+    ),
     (
         "ANALYSIS",
         &[
@@ -69,6 +74,8 @@ impl Page {
             Page::DeveloperCleaner => "Developer",
             Page::Docker => "Docker",
             Page::SecurityCenter => "Security Center",
+            Page::Antivirus => "Antivirus",
+            Page::BackupSync => "Backup & Sync",
             Page::StorageAnalyzer => "Storage Analyzer",
             Page::DuplicateFinder => "Duplicate Finder",
             Page::LargeFiles => "Large Files",
@@ -91,6 +98,7 @@ impl Page {
                 | Page::DeveloperCleaner
                 | Page::Docker
                 | Page::SecurityCenter
+                | Page::Antivirus
                 | Page::AppCleaner
                 | Page::StorageAnalyzer
                 | Page::DuplicateFinder
@@ -148,6 +156,8 @@ impl Page {
             Page::DeveloperCleaner => i::CODE,
             Page::Docker => i::CUBE,
             Page::SecurityCenter => i::SHIELD_CHECK,
+            Page::Antivirus => i::BUG_BEETLE,
+            Page::BackupSync => i::ARROWS_CLOCKWISE,
             Page::StorageAnalyzer => i::CHART_PIE,
             Page::DuplicateFinder => i::COPY,
             Page::LargeFiles => i::FILE_ARROW_DOWN,
@@ -188,13 +198,27 @@ pub fn sidebar(
     });
     ui.add_space(6.0);
     crate::theme::appearance_switch(ui);
-    let disk_h = if disk.is_some() { 118.0 } else { 0.0 };
+    let disk_h = if disk.is_some() { 104.0 } else { 0.0 };
+    // A solid, always-visible bar: on short windows (e.g. 1366×768 at 125 %)
+    // the last pages are below the fold and must look reachable.
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+    // The default handle colour is the sidebar's own fill: make it visible.
+    {
+        let w = &mut ui.visuals_mut().widgets;
+        w.inactive.bg_fill = p.border;
+        w.hovered.bg_fill = p.muted;
+        w.active.bg_fill = p.muted;
+    }
     egui::ScrollArea::vertical()
         .max_height((ui.available_height() - disk_h).max(120.0))
         .auto_shrink([false, true])
+        // Always show the bar, so a short window makes it obvious that
+        // more pages are below.
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
         .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
             for (section, pages) in SECTIONS {
-                ui.add_space(10.0);
+                ui.add_space(8.0);
                 ui.label(RichText::new(*section).small().strong().color(p.muted));
                 for &page in *pages {
                     if nav_item(ui, page, *current == page, badge(page)) {
@@ -204,46 +228,53 @@ pub fn sidebar(
             }
         });
     if let Some((total, avail)) = disk {
+        // bottom_up only pins the card to the bottom; its contents are laid
+        // out top-down so they read in order.
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.add_space(10.0);
             crate::theme::card(ui)
                 .inner_margin(egui::Margin::same(12))
                 .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    let used = total.saturating_sub(avail);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Disk").small().color(p.muted));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} free",
-                                    rustclean_core::format_bytes(avail)
-                                ))
-                                .small()
-                                .strong(),
+                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_width(ui.available_width());
+                        let used = total.saturating_sub(avail);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Disk").small().color(p.muted));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{} free",
+                                            rustclean_core::format_bytes(avail)
+                                        ))
+                                        .small()
+                                        .strong(),
+                                    );
+                                },
                             );
                         });
+                        let frac = if total > 0 {
+                            used as f32 / total as f32
+                        } else {
+                            0.0
+                        };
+                        ui.add(
+                            egui::ProgressBar::new(frac)
+                                .desired_height(6.0)
+                                .fill(p.text2)
+                                .corner_radius(3),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "{} of {} used",
+                                rustclean_core::format_bytes(used),
+                                rustclean_core::format_bytes(total)
+                            ))
+                            .small()
+                            .color(p.muted),
+                        );
                     });
-                    let frac = if total > 0 {
-                        used as f32 / total as f32
-                    } else {
-                        0.0
-                    };
-                    ui.add(
-                        egui::ProgressBar::new(frac)
-                            .desired_height(6.0)
-                            .fill(p.text2)
-                            .corner_radius(3),
-                    );
-                    ui.label(
-                        RichText::new(format!(
-                            "{} of {} used",
-                            rustclean_core::format_bytes(used),
-                            rustclean_core::format_bytes(total)
-                        ))
-                        .small()
-                        .color(p.muted),
-                    );
                 });
         });
     }
@@ -264,13 +295,14 @@ fn nav_item(ui: &mut Ui, page: Page, active: bool, badge: Option<String>) -> boo
     let resp = egui::Frame::new()
         .fill(fill)
         .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(10, 6))
+        .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
+            ui.spacing_mut().interact_size.y = 20.0;
             ui.horizontal(|ui| {
                 ui.label(RichText::new(page.icon()).size(15.0).color(fg));
-                let title = RichText::new(page.title()).color(fg);
-                ui.label(if active { title.strong() } else { title });
+                // Badge first (right-aligned), so a long title shortens with
+                // "…" instead of running into it on a narrow sidebar.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let text = if available {
                         badge
@@ -280,6 +312,14 @@ fn nav_item(ui: &mut Ui, page: Page, active: bool, badge: Option<String>) -> boo
                     if let Some(t) = text {
                         ui.label(RichText::new(t).small().color(p.muted));
                     }
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        let title = RichText::new(page.title()).color(fg);
+                        ui.add(
+                            egui::Label::new(if active { title.strong() } else { title })
+                                .truncate(),
+                        )
+                        .on_hover_text(page.title());
+                    });
                 });
             });
         })

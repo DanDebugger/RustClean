@@ -10,19 +10,22 @@ connections.
 | Module | What it cleans | Removal |
 |---|---|---|
 | **Junk Cleaner** | Third-party app caches, updater caches (ShipIt, `*-updater`), logs, crash reports, per-user temp files, `.dmg`/`.pkg`/`.xip` installers in `~/Downloads` | Trash / quarantine |
-| **App Caches** | Caches grouped **per app** (largest first): `~/Library/Caches`, sandboxed app containers (`~/Library/Containers/*/Data/Library/Caches`) and Electron app caches (Slack, VS Code, Discord… — `Cache`, `Code Cache`, `GPUCache`). Tick an app to clear its whole cache; running apps → Review | Trash / quarantine |
+| **App Caches** | Caches grouped **per app** (largest first): `~/Library/Caches`, sandboxed app containers (`~/Library/Containers/*/Data/Library/Caches`) and Electron app caches (Slack, VS Code, Discord… — `Cache`, `Code Cache`, `GPUCache`). On Windows: only Electron app caches in `%APPDATA%` (folders with Chromium's `Local State`); `%LOCALAPPDATA%` is not scanned because it mixes caches with app data. Tick an app to clear its whole cache; running apps → Review | Trash / quarantine |
 | **Browser Cleaner** | Google Chrome HTTP, code, GPU, shader and service-worker caches, temporary data, logs | Trash / quarantine |
 | **Developer Cleaner** | npm, Yarn, pnpm metadata, Cargo registry cache, Go build cache, Xcode DerivedData / device support, simulator caches, Gradle, Maven, pip, uv, Homebrew downloads, CocoaPods, Swift PM, Playwright browsers, node-gyp, TypeScript, Composer, Prisma | Trash / quarantine |
-| **Docker** | Stopped containers, unused images, unused build cache, and (opt-in) unused volumes — via the Docker Engine API (OrbStack, Docker Desktop, Colima, Rancher Desktop, `/var/run/docker.sock`, `DOCKER_HOST`) | Docker API, **irreversible** |
+| **Docker** | Stopped containers, unused images, unused build cache (only records neither in use nor shared, matching Docker's own estimate), and (opt-in) unused volumes — via the Docker Engine API (OrbStack, Docker Desktop, Colima, Rancher Desktop, `/var/run/docker.sock`, `DOCKER_HOST`) | Docker API, **irreversible** |
 
 | **Large Files** | Files over 500 MB in your own non-protected folders (Downloads, project folders…), grouped by type | Trash / quarantine (all Review) |
 | **Duplicate Finder** | Identical files ≥ 1 MB (size → partial → full BLAKE3); one copy per set is always kept | Trash / quarantine (all Review) |
 | **App Leftovers** (macOS) | Support files of apps no longer installed (`~/Library/Application Support`, Preferences, Logs, Saved State, HTTPStorages, WebKit) | Trash / quarantine (all Review) |
 | **Storage Analyzer** | Drill-down folder sizes and disk usage | Read-only |
+| **Antivirus** | Status of the protection the system already has: Gatekeeper, SIP, XProtect, firewall (macOS); registered antivirus products such as Microsoft Defender (Windows); ClamAV (Linux), with a ring diagram, why each protection matters and *Open settings* buttons that hand over to the system's own settings. Your choices: check at start-up, sidebar warning, treat informational items (e.g. a firewall off by default) as problems. RustClean does not scan files for viruses or change protection settings | Read-only |
+| **Backup & Sync** | Placeholder (shown as *soon*); design not decided yet | — |
 | **Quarantine** | Earlier "Quarantine" cleanups | Restore, or delete permanently (confirmed) |
 
 **Cleaning flow:** select files (per file, per app/category, or *Select
-shown* for the current filter) → *Clean N selected…* → one confirmation
+shown* for the current filter, or *Select for cleanup* in a file's details
+dialog) → the action bar appears → *Clean N selected…* → one confirmation
 dialog with a summary and a per-file review list (untick any file to keep
 it) → **Move N files to Trash**
 (or Quarantine). *Simulate first* is optional; after a simulation, *Clean
@@ -38,18 +41,25 @@ and anything resembling keys, wallets or credentials is Protected.
 
 ### Interface
 
-Modern light/dark theme (rust accent, Phosphor icons, macOS system font when
-available). The layout is responsive down to phone width (min window 360 px):
+Modern light/dark theme (rust accent, Phosphor icons, the system UI font
+when available: SF on macOS, Segoe UI on Windows). The layout is responsive
+down to phone width (min window 360 px):
 
 | Width | Layout |
 |---|---|
-| ≥ 960 px content | Sidebar; results in three columns (categories · table · "why" detail panel) |
-| 640–960 px | Sidebar; category chips, details above a full-width table |
-| < 640 px | Top page picker; chips, stacked file cards, wrapping action bar |
+| ≥ 960 px content | Sidebar; categories list beside a full-width file table |
+| 640–960 px | Sidebar; category and safety dropdowns, file table fills the rest of the window |
+| < 640 px | Top page picker; dropdowns, stacked file cards, wrapping action bar |
 | < 860 px window | Sidebar replaced by the page picker |
 
+Clicking a file opens its details ("why" it has its class, dates, select /
+reveal / copy, previous / next) in a dialog in every layout. The action bar
+appears only while files are selected. Windows shorter than 640 px get
+one-line banners so the file list keeps its space.
+
 Rendered screenshots of the real app (fake home folder, Docker fixture data;
-nothing is removed) at 1280, 900 and 390 px:
+nothing is removed) at 1280, 900 and 390 px, plus 1093×614 (a 1366×768
+Windows laptop at 125 % scaling):
 
 ```sh
 cargo test -p rustclean -- --ignored ui_snapshots   # → design/screenshots/*.png (git-ignored)
@@ -183,6 +193,7 @@ Every cleanup item, including dry runs, is logged to
 
 ```sh
 cargo run -p rustclean-security --example persistence_audit   # read-only
+cargo run -p rustclean-security --example protection_status   # read-only
 ```
 
 ## Platform support
@@ -200,6 +211,9 @@ creation, Windows path canonicalisation).
 | Developer caches | ✅ | ✅ (XDG paths) | ✅ (`%LOCALAPPDATA%` paths, NuGet) |
 | Docker | OrbStack, Docker Desktop, Colima, Rancher | rootless, Podman, Docker Desktop, `/var/run/docker.sock` | named pipe `\\.\pipe\docker_engine` |
 | Persistence audit | LaunchAgents/Daemons | XDG autostart, systemd user units | Startup folder (Run keys planned) |
+| App Caches | ✅ | ✅ | Electron caches in `%APPDATA%` only |
+| Antivirus status | Gatekeeper, SIP, XProtect, firewall | ClamAV installed? | Security Center (`AntiVirusProduct`) via PowerShell |
+| Wording | "Trash", "Reveal in Finder" | "Trash" | "Recycle Bin", "Show in Explorer"; local dates via Win32 |
 
 Linux and Windows builds are type-checked only; they have not been run on
 those systems yet. Path protection matching is case- and
@@ -209,7 +223,8 @@ roots follows the platform (case-sensitive on Linux).
 ## Known limitations
 
 - Space is only reclaimed after the Trash is emptied (or quarantine purged);
-  the UI says so. No quarantine restore/purge UI yet (API only).
+  the UI says so. Disk figures refresh every 3 s, so emptying the Trash
+  outside RustClean shows up without a restart. No quarantine restore/purge UI yet (API only).
 - Moving a very large number of files to the Trash is sequential and can take
   minutes; progress and cancel are shown.
 - A small time-of-check/time-of-use window remains between validation and

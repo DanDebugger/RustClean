@@ -1,7 +1,5 @@
 //! Dashboard page.
 
-use std::path::Path;
-
 use egui::{Color32, CornerRadius, RichText, Ui};
 use rustclean_core::format_bytes;
 use sysinfo::Disks;
@@ -23,14 +21,19 @@ impl DiskInfo {
     pub fn read() -> Option<Self> {
         let disks = Disks::new_with_refreshed_list();
         let root = if cfg!(windows) {
-            Path::new("C:\\")
+            // The Windows drive is not always C:.
+            let drive = std::env::var("SystemDrive")
+                .ok()
+                .filter(|d| d.len() == 2 && d.ends_with(':'))
+                .unwrap_or_else(|| "C:".into());
+            std::path::PathBuf::from(format!("{drive}\\"))
         } else {
-            Path::new("/")
+            std::path::PathBuf::from("/")
         };
         disks
             .list()
             .iter()
-            .find(|d| d.mount_point() == root)
+            .find(|d| d.mount_point() == root.as_path())
             .map(|d| DiskInfo {
                 total: d.total_space(),
                 available: d.available_space(),
@@ -147,21 +150,32 @@ pub fn ui(ui: &mut Ui, state: &mut Loaded) -> Option<Page> {
                 ),
             ];
             let cols = grid_columns(ui.available_width());
-            widgets::card_grid(ui, cards.len(), cols, 12.0, |ui, i| {
-                let (page, title, line) = &cards[i];
-                let (v, b) = module_value(state, *page);
-                if module_card(ui, page.icon(), title, v, b, line).clicked() {
-                    go = Some(*page);
-                }
-            });
+            widgets::card_grid_aligned(
+                ui,
+                "module_cards",
+                cards.len(),
+                cols,
+                12.0,
+                |ui, i, pad| {
+                    let (page, title, line) = &cards[i];
+                    let (v, b) = module_value(state, *page);
+                    let resp = module_card(ui, page.icon(), title, v, b, line, pad);
+                    if resp.clicked() {
+                        go = Some(*page);
+                    }
+                    resp
+                },
+            );
 
             let cols2 = if ui.available_width() >= 760.0 { 2 } else { 1 };
             let mut sec_click = false;
-            widgets::card_grid(ui, 2, cols2, 12.0, |ui, i| {
+            widgets::card_grid_aligned(ui, "summary_cards", 2, cols2, 12.0, |ui, i, pad| {
                 if i == 0 {
-                    sec_click |= security_card(ui, state);
+                    let (clicked, resp) = security_card(ui, state, pad);
+                    sec_click |= clicked;
+                    resp
                 } else {
-                    activity_card(ui, state);
+                    activity_card(ui, state, pad)
                 }
             });
             if sec_click {
@@ -263,24 +277,50 @@ fn disk_bar(ui: &mut Ui, state: &Loaded, d: DiskInfo) {
         }
     }
     segs.push((
-        p.muted.gamma_multiply(0.6),
+        other_used_color(p),
         used.saturating_sub(module_sum) as f32 / total * w,
     ));
-    let clip = painter.with_clip_rect(rect);
-    for (i, (color, width)) in segs.iter().enumerate() {
-        let width = width.max(if i < segs.len() - 1 { 3.0 } else { 0.0 });
-        let r =
-            egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(width, rect.height()));
-        clip.rect_filled(r, CornerRadius::ZERO, *color);
+    // Tiny modules still get a visible sliver.
+    let widths: Vec<f32> = segs
+        .iter()
+        .enumerate()
+        .map(|(i, (_, w))| w.max(if i < segs.len() - 1 { 3.0 } else { 0.0 }))
+        .collect();
+    let used_w = widths.iter().sum::<f32>().min(rect.width());
+    // The whole used span in the first colour with a rounded left end (and
+    // right end when the disk is full); later segments are drawn square on
+    // top. The first segment keeps the rounded cap however thin it is.
+    let full = used_w >= rect.width() - 0.5;
+    let cap = CornerRadius {
+        nw: 7,
+        sw: 7,
+        ne: if full { 7 } else { 0 },
+        se: if full { 7 } else { 0 },
+    };
+    if let Some((first, _)) = segs.first() {
+        let span = egui::Rect::from_min_size(rect.min, egui::vec2(used_w, rect.height()));
+        painter.rect_filled(span, cap, *first);
+    }
+    for (i, ((color, _), width)) in segs.iter().zip(&widths).enumerate() {
+        if i > 0 {
+            let r = egui::Rect::from_min_size(
+                egui::pos2(x, rect.top()),
+                egui::vec2(*width, rect.height()),
+            )
+            .intersect(rect);
+            let corners = if full && x + width >= rect.right() - 0.5 {
+                CornerRadius {
+                    ne: 7,
+                    se: 7,
+                    ..CornerRadius::ZERO
+                }
+            } else {
+                CornerRadius::ZERO
+            };
+            painter.rect_filled(r, corners, *color);
+        }
         x += width;
     }
-    // Round the outer corners by redrawing the frame edge.
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(7),
-        egui::Stroke::new(2.0, p.surface),
-        egui::StrokeKind::Outside,
-    );
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
         for (page, name, color) in SEGMENTS {
@@ -290,7 +330,7 @@ fn disk_bar(ui: &mut Ui, state: &Loaded, d: DiskInfo) {
         }
         legend(
             ui,
-            p.muted.gamma_multiply(0.6),
+            other_used_color(p),
             &format!(
                 "Other used {}",
                 format_bytes(used.saturating_sub(module_sum))
@@ -298,6 +338,12 @@ fn disk_bar(ui: &mut Ui, state: &Loaded, d: DiskInfo) {
         );
         legend(ui, p.border, &format!("Free {}", format_bytes(d.available)));
     });
+}
+
+/// "Other used" grey. Opaque, so it looks the same whatever is drawn
+/// beneath it (the bar paints the used span first).
+fn other_used_color(p: &crate::theme::Palette) -> Color32 {
+    p.border.lerp_to_gamma(p.muted, 0.6)
 }
 
 fn legend(ui: &mut Ui, color: Color32, text: &str) {
@@ -326,12 +372,12 @@ fn module_card(
     value: Option<u64>,
     busy: bool,
     line: &str,
+    pad: f32,
 ) -> egui::Response {
     let p = palette(ui);
     theme::card(ui)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.set_min_height(132.0);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             ui.horizontal(|ui| {
                 ui.label(RichText::new(icon).size(18.0).color(p.accent));
@@ -354,6 +400,8 @@ fn module_card(
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.add(egui::Label::new(RichText::new(line).small().color(p.muted)).wrap());
             });
+            // Extra height goes above the link, so links line up in a row.
+            ui.add_space(pad);
             ui.label(RichText::new("Review →").strong().color(p.accent));
         })
         .response
@@ -361,10 +409,11 @@ fn module_card(
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn security_card(ui: &mut Ui, state: &Loaded) -> bool {
+/// Returns (open clicked, card response).
+fn security_card(ui: &mut Ui, state: &Loaded, pad: f32) -> (bool, egui::Response) {
     let p = palette(ui);
     let mut open = false;
-    theme::card(ui).show(ui, |ui| {
+    let resp = theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             ui.label(RichText::new(egui_phosphor::regular::SHIELD_CHECK).size(18.0).color(p.accent));
@@ -390,11 +439,12 @@ fn security_card(ui: &mut Ui, state: &Loaded) -> bool {
         }
         let (files, bytes) = state.quarantine.total();
         row(ui, "In quarantine", &if files > 0 { format!("{files} files · {}", format_bytes(bytes)) } else { "Empty".into() });
+        ui.add_space(pad);
     });
-    open
+    (open, resp.response)
 }
 
-fn activity_card(ui: &mut Ui, state: &Loaded) {
+fn activity_card(ui: &mut Ui, state: &Loaded, pad: f32) -> egui::Response {
     let p = palette(ui);
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -406,7 +456,8 @@ fn activity_card(ui: &mut Ui, state: &Loaded) {
             ui.label(RichText::new("Scans and cleanups from this session appear here. Every cleanup is also written to the operation log.").color(p.muted));
         }
         for (at, text) in state.activity.iter().rev().take(5) {
-            ui.horizontal(|ui| {
+            // Top-aligned: the bullet sits on the first line of the entry.
+            ui.horizontal_top(|ui| {
                 ui.label(RichText::new("•").color(p.muted));
                 ui.vertical(|ui| {
                     ui.add(egui::Label::new(RichText::new(text).color(p.text)).wrap());
@@ -414,7 +465,9 @@ fn activity_card(ui: &mut Ui, state: &Loaded) {
                 });
             });
         }
-    });
+        ui.add_space(pad);
+    })
+    .response
 }
 
 fn row(ui: &mut Ui, k: &str, v: &str) {

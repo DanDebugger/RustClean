@@ -26,7 +26,7 @@ impl RunningApps {
         let mut apps = Self::default();
         let mut seen_bundles: HashSet<PathBuf> = HashSet::new();
         for p in sys.processes().values() {
-            apps.names.insert(p.name().to_string_lossy().to_lowercase());
+            apps.add_name(&p.name().to_string_lossy());
             let Some(exe) = p.exe() else { continue };
             for bundle in app_bundles_of(exe) {
                 if seen_bundles.insert(bundle.clone()) {
@@ -47,22 +47,34 @@ impl RunningApps {
             true,
             ProcessRefreshKind::nothing(),
         );
-        Self {
-            bundle_ids: HashSet::new(),
-            names: sys
-                .processes()
-                .values()
-                .map(|p| p.name().to_string_lossy().to_lowercase())
-                .collect(),
+        let mut apps = Self::default();
+        for p in sys.processes().values() {
+            apps.add_name(&p.name().to_string_lossy());
         }
+        apps
     }
 
     /// For tests: build from explicit identifiers and names.
     pub fn from_parts(bundle_ids: &[&str], names: &[&str]) -> Self {
-        Self {
+        let mut apps = Self {
             bundle_ids: bundle_ids.iter().map(|s| s.to_lowercase()).collect(),
-            names: names.iter().map(|s| s.to_lowercase()).collect(),
+            names: HashSet::new(),
+        };
+        for n in names {
+            apps.add_name(n);
         }
+        apps
+    }
+
+    /// Records a process name, lowercased. A Windows `.exe` name such as
+    /// `Slack.exe` is also recorded without the suffix, so it matches the
+    /// owner folder `Slack`; the full name stays for `running_processes`.
+    fn add_name(&mut self, name: &str) {
+        let lower = name.to_lowercase();
+        if let Some(stem) = lower.strip_suffix(".exe").filter(|s| !s.is_empty()) {
+            self.names.insert(stem.to_string());
+        }
+        self.names.insert(lower);
     }
 
     fn add_bundle(&mut self, bundle: &Path) {
@@ -156,6 +168,21 @@ mod tests {
         // that only ever makes classification stricter.
         assert!(r.owner_running("com.microsoft").is_some());
         assert!(r.owner_running("com.micro").is_none());
+    }
+
+    #[test]
+    fn matches_windows_exe_process_names() {
+        let r = RunningApps::from_parts(&[], &["Slack.exe", "Discord.EXE", "Code.exe"]);
+        for owner in ["Slack", "slack", "discord", "Code"] {
+            assert!(r.owner_running(owner).is_some(), "{owner}");
+        }
+        assert!(r.owner_running("Teams").is_none());
+        assert!(r.owner_running("exe").is_none());
+        // The full process name is still queryable.
+        assert_eq!(r.running_processes(&["slack.exe"]), vec!["slack.exe"]);
+        // A bare ".exe" name does not produce an empty owner.
+        let r = RunningApps::from_parts(&[], &[".exe"]);
+        assert!(r.owner_running("").is_none());
     }
 
     #[test]

@@ -77,6 +77,51 @@ pub fn card_grid(
     }
 }
 
+/// Like [`card_grid`], but cards in the same row get the same height.
+///
+/// `card(ui, i, pad)` draws card `i` and returns its response; it should add
+/// `pad` points of space where extra height looks right (e.g. above a
+/// bottom link, so links line up). Heights are measured each frame and the
+/// padding applies from the next one; a changed padding re-runs the pass, so
+/// nothing visibly jumps.
+pub fn card_grid_aligned(
+    ui: &mut Ui,
+    id_salt: impl egui::AsIdSalt,
+    n: usize,
+    cols: usize,
+    gap: f32,
+    mut card: impl FnMut(&mut Ui, usize, f32) -> Response,
+) {
+    let id = ui.id().with(id_salt);
+    let cols = cols.max(1);
+    let pads: Vec<f32> = ui
+        .ctx()
+        .data(|d| d.get_temp::<Vec<f32>>(id))
+        .filter(|p| p.len() == n)
+        .unwrap_or_else(|| vec![0.0; n]);
+    // Natural (unpadded) height of every card this frame.
+    let mut natural = vec![0.0; n];
+    card_grid(ui, n, cols, gap, |ui, i| {
+        let pad = if cols > 1 { pads[i] } else { 0.0 };
+        let resp = card(ui, i, pad);
+        natural[i] = resp.rect.height() - pad;
+    });
+    let mut new_pads = vec![0.0; n];
+    if cols > 1 {
+        for row in natural.chunks(cols).enumerate() {
+            let (r, heights) = row;
+            let max = heights.iter().copied().fold(0.0, f32::max);
+            for (j, h) in heights.iter().enumerate() {
+                new_pads[r * cols + j] = (max - h).max(0.0).round();
+            }
+        }
+    }
+    if new_pads.iter().zip(&pads).any(|(a, b)| (a - b).abs() > 0.5) {
+        ui.ctx().data_mut(|d| d.insert_temp(id, new_pads));
+        ui.ctx().request_discard("equalise card heights");
+    }
+}
+
 pub fn class_tone(class: SafetyClass) -> Tone {
     match class {
         SafetyClass::Safe => Tone::Safe,
@@ -385,6 +430,10 @@ pub fn format_local(t: SystemTime) -> String {
             );
         }
     }
+    #[cfg(windows)]
+    if let Some((y, mo, d, h, mi)) = windows_local_time(secs) {
+        return format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}");
+    }
     let (y, m, day) = civil_from_days(secs.div_euclid(86_400));
     let rem = secs.rem_euclid(86_400);
     format!(
@@ -392,6 +441,57 @@ pub fn format_local(t: SystemTime) -> String {
         rem / 3600,
         rem % 3600 / 60
     )
+}
+
+/// Unix seconds → local (year, month, day, hour, minute) on Windows, using
+/// the system's time-zone rules for that date (so DST is right for past
+/// dates too). Declared by hand: two kernel32 calls do not justify a crate.
+#[cfg(windows)]
+fn windows_local_time(secs: i64) -> Option<(u16, u16, u16, u16, u16)> {
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct SystemTime {
+        year: u16,
+        month: u16,
+        day_of_week: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        milliseconds: u16,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn FileTimeToSystemTime(ft: *const FileTime, st: *mut SystemTime) -> i32;
+        fn SystemTimeToTzSpecificLocalTime(
+            tz: *const core::ffi::c_void,
+            utc: *const SystemTime,
+            local: *mut SystemTime,
+        ) -> i32;
+    }
+    // FILETIME counts 100 ns intervals since 1601-01-01 (UTC).
+    let ticks = u64::try_from(secs.checked_add(11_644_473_600)?)
+        .ok()?
+        .checked_mul(10_000_000)?;
+    let ft = FileTime {
+        low: ticks as u32,
+        high: (ticks >> 32) as u32,
+    };
+    let mut utc = SystemTime::default();
+    let mut local = SystemTime::default();
+    // SAFETY: both structs are #[repr(C)] with the Win32 layouts; the calls
+    // only write into the out-pointers and return 0 on failure. A null
+    // time zone means "the current one".
+    let ok = unsafe {
+        FileTimeToSystemTime(&ft, &mut utc) != 0
+            && SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) != 0
+    };
+    ok.then_some((local.year, local.month, local.day, local.hour, local.minute))
 }
 
 /// "2026-11-24 14:05 (3 days ago)".
@@ -477,6 +577,23 @@ pub fn file_card(
         })
         .response
         .interact(egui::Sense::click())
+}
+
+/// What this system calls its trash: "Recycle Bin" on Windows.
+pub fn trash_name() -> &'static str {
+    trash_name_for(cfg!(windows))
+}
+
+fn trash_name_for(windows: bool) -> &'static str {
+    if windows { "Recycle Bin" } else { "Trash" }
+}
+
+/// Removal method label using the system's own trash name.
+pub fn method_label(m: rustclean_core::RemovalMethod) -> String {
+    match m {
+        rustclean_core::RemovalMethod::Trash => format!("Move to {}", trash_name()),
+        rustclean_core::RemovalMethod::Quarantine => m.label().to_string(),
+    }
 }
 
 pub fn reveal_label() -> &'static str {
@@ -626,5 +743,17 @@ mod tests {
         );
         assert_eq!(tilde_path(home, home), "~");
         assert_eq!(tilde_path(Path::new("/tmp/x"), home), "/tmp/x");
+    }
+
+    #[test]
+    fn trash_is_named_like_the_system_does() {
+        assert_eq!(trash_name_for(true), "Recycle Bin");
+        assert_eq!(trash_name_for(false), "Trash");
+        let expected = if cfg!(windows) {
+            "Move to Recycle Bin"
+        } else {
+            "Move to Trash"
+        };
+        assert_eq!(method_label(rustclean_core::RemovalMethod::Trash), expected);
     }
 }

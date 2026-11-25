@@ -60,6 +60,22 @@ pub fn local_app_data(home: &Path) -> PathBuf {
     }
 }
 
+/// Per-user roaming application data: where Electron apps keep their user
+/// data (`%APPDATA%` on Windows, falling back to `<home>\AppData\Roaming`;
+/// `%APPDATA%` is ignored unless absolute). On macOS this is
+/// `~/Library/Application Support` and on Linux `$XDG_CONFIG_HOME`
+/// (default `~/.config`), the equivalent locations for the same apps.
+pub fn roaming_app_data(home: &Path) -> PathBuf {
+    match CURRENT {
+        Os::Windows => std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home.join("AppData").join("Roaming")),
+        Os::MacOs => home.join("Library/Application Support"),
+        _ => xdg_dir("XDG_CONFIG_HOME", home, ".config"),
+    }
+}
+
 /// Per-user cache directory (`~/Library/Caches`, `$XDG_CACHE_HOME`,
 /// `%LOCALAPPDATA%`).
 pub fn user_cache_dir(home: &Path) -> PathBuf {

@@ -30,6 +30,9 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[build-dependencies]
+embed-resource.workspace = true
+
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["wgpu", "eframe", "snapshot"] }
 serde_json.workspace = true

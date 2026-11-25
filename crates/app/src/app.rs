@@ -10,6 +10,7 @@ use rustclean_junk::{AppCachesModule, DeveloperModule, JunkModule};
 use rustclean_safety::{ProtectionRules, app_data_dir, app_log_dir, home_dir};
 use rustclean_storage::LargeFilesModule;
 
+use crate::antivirus_page::AntivirusPage;
 use crate::dashboard::{self, DiskInfo};
 use crate::docker_page::DockerPage;
 use crate::navigation::{self, Page};
@@ -24,16 +25,22 @@ pub struct RustCleanApp {
     pub(crate) state: Option<Loaded>,
 }
 
+/// How often disk figures are re-read, so freed space (emptying the Trash,
+/// Docker removals, quarantine purges, other apps) shows up without a restart.
+const DISK_REFRESH: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub struct Loaded {
     home: PathBuf,
     rules: ProtectionRules,
     pub disk: Option<DiskInfo>,
+    disk_read_at: std::time::Instant,
     pub junk: ScanPage,
     pub app_caches: ScanPage,
     pub browser: ScanPage,
     pub developer: ScanPage,
     pub docker: DockerPage,
     pub security: SecurityPage,
+    pub antivirus: AntivirusPage,
     pub large_files: ScanPage,
     pub duplicates: ScanPage,
     pub leftovers: ScanPage,
@@ -56,6 +63,7 @@ impl Loaded {
             developer: page("developer", Box::new(DeveloperModule::new(home.clone()))),
             docker: DockerPage::new(home.clone()),
             security: SecurityPage::new(home.clone()),
+            antivirus: AntivirusPage::new(home.clone()),
             large_files: page("large", Box::new(LargeFilesModule::new(home.clone()))),
             duplicates: page("dupes", Box::new(DuplicatesModule::new(home.clone()))),
             leftovers: page("leftovers", Box::new(LeftoversModule::new(home.clone()))),
@@ -63,6 +71,7 @@ impl Loaded {
             quarantine: QuarantinePage::new(home.clone(), rules.clone()),
             activity: Vec::new(),
             disk: DiskInfo::read(),
+            disk_read_at: std::time::Instant::now(),
             home,
             rules,
         }
@@ -84,6 +93,7 @@ impl Loaded {
         self.file_pages().iter().any(|p| p.is_busy())
             || self.docker.is_busy()
             || self.security.is_busy()
+            || self.antivirus.is_busy()
             || self.storage.is_busy()
     }
 
@@ -106,6 +116,7 @@ impl Loaded {
                 .security
                 .summary()
                 .map(|(_, warn, notice)| (warn + notice).to_string()),
+            Page::Antivirus => self.antivirus.badge(),
             _ => None,
         }
     }
@@ -144,10 +155,19 @@ impl Loaded {
         self.quarantine.poll_jobs();
         self.docker.poll_jobs(ctx);
         self.security.poll_jobs();
+        self.antivirus.tick(ctx);
+        self.antivirus.poll_jobs();
         if disk_changed {
-            self.disk = DiskInfo::read();
             self.quarantine.refresh();
         }
+        // Live disk figures: right after a cleanup, and every few seconds
+        // otherwise (space is freed outside RustClean too, e.g. by emptying
+        // the Trash). Reading capacity is cheap and read-only.
+        if disk_changed || self.disk_read_at.elapsed() >= DISK_REFRESH {
+            self.disk = DiskInfo::read();
+            self.disk_read_at = std::time::Instant::now();
+        }
+        ctx.request_repaint_after(DISK_REFRESH);
         if self.any_busy() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
@@ -196,7 +216,7 @@ impl eframe::App for RustCleanApp {
         } else {
             egui::Panel::left("sidebar")
                 .resizable(false)
-                .exact_size(if width < 1100.0 { 200.0 } else { 232.0 })
+                .exact_size(if width < 1100.0 { 216.0 } else { 232.0 })
                 .frame(
                     egui::Frame::new()
                         .fill(p.surface)
@@ -241,6 +261,8 @@ impl eframe::App for RustCleanApp {
                     }
                 }
                 Page::SecurityCenter => state.security.ui(ui),
+                Page::Antivirus => state.antivirus.ui(ui),
+                Page::BackupSync => backup_ui(ui),
                 Page::JunkCleaner => state.junk.ui(ui),
                 Page::AppCaches => state.app_caches.ui(ui),
                 Page::BrowserCleaner => state.browser.ui(ui),
@@ -281,9 +303,9 @@ fn protection_ui(ui: &mut Ui, state: &Loaded) {
             "Symbolic links are never followed and never removed.",
             "Only regular files are removed; folders are left in place.",
             "Every file is re-validated immediately before removal and skipped if it changed since the scan.",
-            "Files are moved to the Trash or RustClean quarantine, never deleted outright.",
+            &format!("Files are moved to the {} or RustClean quarantine, never deleted outright.", widgets::trash_name()),
             "Unknown and Protected files cannot be selected.",
-            "Apple system caches are not scanned.",
+            "Operating-system caches are not scanned.",
             "Chrome bookmarks, passwords, history, cookies, extensions and profiles are always protected.",
             "Developer caches are included only where removing any subset of files is harmless.",
             "Docker is cleaned only through the Docker API, never by touching its disk image; running containers, images in use and volumes in use are never offered.",
@@ -297,7 +319,10 @@ fn about_ui(ui: &mut Ui, state: &Loaded) {
     widgets::page_header(ui, Some("Settings"), "About RustClean", None);
     ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
     ui.add_space(6.0);
-    ui.label("A fast, privacy-focused macOS cleaner written entirely in Rust. RustClean makes no network connections; Docker is reached only through its local socket.");
+    ui.add(egui::Label::new(format!(
+        "A fast, privacy-focused disk cleaner for {} written entirely in Rust. RustClean makes no network connections; Docker is reached only through its local connection.",
+        rustclean_safety::platform::CURRENT.name()
+    )).wrap());
     ui.add_space(6.0);
     ui.label(format!(
         "Quarantine: {}",
@@ -307,6 +332,12 @@ fn about_ui(ui: &mut Ui, state: &Loaded) {
         "Operation log: {}",
         app_log_dir(&state.home).join("operations.jsonl").display()
     ));
+}
+
+/// Placeholder: the design (storage, sync target) is not decided yet, so the
+/// page deliberately promises nothing.
+fn backup_ui(ui: &mut Ui) {
+    widgets::page_header(ui, Some("Security"), "Backup & Sync", Some("Coming soon"));
 }
 
 fn planned_ui(ui: &mut Ui, page: Page) {

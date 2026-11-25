@@ -41,6 +41,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 unicode-normalization = "0.1"
 tempfile = "3"
+# Build-time only: embeds the icon into the Windows .exe.
+embed-resource = "3"
 
 [profile.release]
 lto = "thin"

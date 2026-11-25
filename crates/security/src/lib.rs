@@ -8,8 +8,16 @@
 //! The audit reports *signals to review*, never verdicts: a signal such as
 //! "runs an inline shell command" is common in malware but also in
 //! legitimate tools. Nothing here modifies the system.
+//!
+//! The second check is a **protection status** report: whether the system's
+//! own protection (Gatekeeper, SIP, XProtect and the firewall on macOS,
+//! registered antivirus products on Windows, ClamAV on Linux) is on. RustClean
+//! is not an antivirus engine and never scans files for viruses.
 
+pub mod antivirus;
 pub mod persistence;
+
+pub use antivirus::{ProtectionCheck, ProtectionReport, ProtectionStatus, scan_protection};
 
 pub use persistence::{
     Finding, PersistenceItem, PersistenceReport, Risk, Source, analyse_command, scan_persistence,

@@ -33,7 +33,9 @@ struct ConfirmState {
 pub struct DockerPage {
     home: PathBuf,
     endpoints: Vec<Endpoint>,
-    endpoint_idx: usize,
+    /// The chosen engine, by socket: indices shift when engines start or
+    /// stop between scans.
+    endpoint_socket: Option<PathBuf>,
     allow_volumes: bool,
 
     scan_job: Option<Job<Result<DockerReport, String>>>,
@@ -54,7 +56,7 @@ impl DockerPage {
         Self {
             home,
             endpoints,
-            endpoint_idx: 0,
+            endpoint_socket: None,
             allow_volumes: false,
             scan_job: None,
             report: None,
@@ -124,21 +126,52 @@ impl DockerPage {
         !self.endpoints.is_empty()
     }
 
+    /// Index of the chosen engine in `endpoints` (the first if the chosen
+    /// one is gone).
+    fn endpoint_index(&self) -> usize {
+        self.endpoint_socket
+            .as_ref()
+            .and_then(|s| self.endpoints.iter().position(|e| &e.socket == s))
+            .unwrap_or(0)
+    }
+
+    /// Shows a new scan result. Keeps what was selected if it still exists
+    /// and is still selectable (classes may change between scans); removed
+    /// items simply disappear.
+    fn apply_report(&mut self, report: DockerReport) {
+        let keep = self.selected_keys();
+        self.selected = report
+            .items
+            .iter()
+            .map(|i| i.class.is_selectable() && keep.contains(&(i.kind, i.id.clone())))
+            .collect();
+        self.report = Some(report);
+    }
+
+    /// Selection keyed by item, so it survives a rescan (kind + id).
+    fn selected_keys(&self) -> std::collections::HashSet<(ItemKind, String)> {
+        let Some(r) = &self.report else {
+            return Default::default();
+        };
+        r.items
+            .iter()
+            .zip(&self.selected)
+            .filter(|(_, s)| **s)
+            .map(|(i, _)| (i.kind, i.id.clone()))
+            .collect()
+    }
+
     pub fn start_scan(&mut self, ctx: &egui::Context) {
         if self.is_busy() {
             return;
         }
         self.endpoints = discover_endpoints(&self.home);
-        let Some(ep) = self
-            .endpoints
-            .get(self.endpoint_idx)
-            .or(self.endpoints.first())
-            .cloned()
-        else {
+        let Some(ep) = self.endpoints.get(self.endpoint_index()).cloned() else {
             self.error = Some("No Docker engine socket found.".into());
             return;
         };
         self.error = None;
+        self.endpoint_socket = Some(ep.socket.clone());
         let allow_volumes = self.allow_volumes;
         match Job::spawn("docker-scan", ctx.clone(), move |_| {
             scan(&ep, allow_volumes).map_err(|e| e.to_string())
@@ -153,8 +186,7 @@ impl DockerPage {
             match job.poll() {
                 Poll::Pending => {}
                 Poll::Done(Ok(report)) => {
-                    self.selected = vec![false; report.items.len()];
-                    self.report = Some(report);
+                    self.apply_report(report);
                     self.last_scan = Some(SystemTime::now());
                     self.scan_job = None;
                 }
@@ -200,7 +232,8 @@ impl DockerPage {
         if self.is_busy() {
             ctx.request_repaint_after(Duration::from_millis(150));
         }
-        if self.report.is_some() {
+        let any_selected = self.selected.iter().any(|s| *s);
+        if self.report.is_some() && (any_selected || self.clean_job.is_some()) {
             egui::Panel::bottom("docker_footer")
                 .frame(egui::Frame::new().inner_margin(egui::Margin {
                     left: 0,
@@ -211,7 +244,6 @@ impl DockerPage {
                 .show(ui, |ui| self.footer_ui(ui));
         }
 
-        widgets::page_header(ui, Some("Cleanup"), "Docker", None);
         self.header_ui(ui, &ctx);
         if let Some(e) = &self.error {
             widgets::error(ui, e);
@@ -227,45 +259,78 @@ impl DockerPage {
     }
 
     fn header_ui(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        let p = crate::theme::palette(ui);
+        let subtitle = match &self.report {
+            Some(r) => format!(
+                "{}{} · nothing is removed without your confirmation",
+                r.endpoint.name,
+                r.server_version
+                    .as_deref()
+                    .map(|v| format!(" (Docker {v})"))
+                    .unwrap_or_default()
+            ),
+            None => "Scanning only asks Docker for disk usage; nothing is removed.".into(),
+        };
+        let mut scan = false;
+        let busy = self.is_busy();
+        let has_engine = !self.endpoints.is_empty();
+        let label = if self.report.is_some() {
+            format!("{}  Rescan", egui_phosphor::regular::ARROW_CLOCKWISE)
+        } else {
+            format!("{}  Scan Docker", egui_phosphor::regular::MAGNIFYING_GLASS)
+        };
+        widgets::header_with_action(ui, Some("Cleanup"), "Docker", Some(&subtitle), |ui| {
+            if busy {
+                ui.spinner();
+            } else if ui
+                .add_enabled(has_engine, crate::theme::primary_button(ui, &label))
+                .clicked()
+            {
+                scan = true;
+            }
+        });
+
         if self.endpoints.is_empty() {
-            ui.label("No Docker engine found (checked OrbStack, Docker Desktop, Colima, Rancher Desktop, /var/run/docker.sock and DOCKER_HOST).");
+            widgets::callout(
+                ui,
+                "No Docker engine found (checked OrbStack, Docker Desktop, Colima, Rancher Desktop, /var/run/docker.sock and DOCKER_HOST). Start Docker, then scan again.",
+                widgets::Tone::Unknown,
+            );
         }
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if !self.endpoints.is_empty() {
-                ui.label(RichText::new("Engine").weak());
-                let current = &self.endpoints[self.endpoint_idx.min(self.endpoints.len() - 1)];
+                ui.label(RichText::new("Engine").color(p.muted));
+                let current = self.endpoint_index();
+                let mut chosen = current;
+                // Name only (paths are long); the socket is on hover.
+                let width = (ui.available_width() - 16.0).clamp(120.0, 260.0);
                 egui::ComboBox::from_id_salt("docker_endpoint")
-                    .selected_text(format!("{} ({})", current.name, current.socket.display()))
+                    .selected_text(&self.endpoints[current].name)
+                    .width(width)
                     .show_ui(ui, |ui| {
                         for (i, ep) in self.endpoints.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut self.endpoint_idx,
-                                i,
-                                format!("{} ({})", ep.name, ep.socket.display()),
-                            );
+                            ui.selectable_value(&mut chosen, i, &ep.name)
+                                .on_hover_text(ep.socket.display().to_string());
                         }
-                    });
+                    })
+                    .response
+                    .on_hover_text(self.endpoints[current].socket.display().to_string());
+                if chosen != current {
+                    // Results belong to one engine: never show (or act on)
+                    // another engine's list under the new name.
+                    self.endpoint_socket = Some(self.endpoints[chosen].socket.clone());
+                    self.report = None;
+                    self.selected.clear();
+                    self.kind_filter = None;
+                    scan = true;
+                }
             }
             if self.scan_job.is_some() {
-                ui.spinner();
-                ui.label("Asking Docker for disk usage…");
+                ui.label(RichText::new("Asking Docker for disk usage…").color(p.muted));
             } else if let Some((job, total)) = &self.clean_job {
-                ui.spinner();
                 ui.label(format!("Removing… {} of {total}", job.progress.items()));
                 if ui.button("Cancel").clicked() {
                     job.progress.cancel();
-                }
-            } else {
-                let label = if self.report.is_some() {
-                    "Rescan"
-                } else {
-                    "Scan Docker"
-                };
-                if ui
-                    .add_enabled(!self.endpoints.is_empty(), Button::new(label))
-                    .clicked()
-                {
-                    self.start_scan(ctx);
                 }
             }
         });
@@ -275,17 +340,23 @@ impl DockerPage {
             "Allow selecting unused volumes (volume data cannot be recovered)",
         );
         if before != self.allow_volumes && self.report.is_some() {
+            scan = true;
+        }
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "RustClean uses the Docker API only and never touches Docker's disk image. \
+                     Running containers, images they use and volumes in use are never offered. \
+                     Docker removals cannot be undone.",
+                )
+                .small()
+                .color(p.muted),
+            )
+            .wrap(),
+        );
+        if scan && !busy {
             self.start_scan(ctx);
         }
-        ui.label(
-            RichText::new(
-                "RustClean uses the Docker API only and never touches Docker's disk image. \
-                 Running containers, images they use and volumes in use are never offered. \
-                 Docker removals cannot be undone.",
-            )
-            .small()
-            .weak(),
-        );
     }
 
     fn summary_ui(&mut self, ui: &mut Ui) {
@@ -294,13 +365,7 @@ impl DockerPage {
         ui.add(
             egui::Label::new(
                 RichText::new(format!(
-                    "{}{} · Docker estimates {} reclaimable now",
-                    report.endpoint.name,
-                    report
-                        .server_version
-                        .as_deref()
-                        .map(|v| format!(" (Docker {v})"))
-                        .unwrap_or_default(),
+                    "Docker estimates {} reclaimable now",
                     format_bytes(report.totals.values().map(|t| t.reclaimable).sum()),
                 ))
                 .color(p.text2),
@@ -531,18 +596,31 @@ impl DockerPage {
             .zip(&self.selected)
             .filter(|(_, s)| **s)
             .fold((0usize, 0u64), |(n, b), (i, _)| (n + 1, b + i.size));
+        let hidden = match self.kind_filter {
+            Some(k) => report
+                .items
+                .iter()
+                .zip(&self.selected)
+                .filter(|(i, s)| **s && i.kind != k)
+                .count(),
+            None => 0,
+        };
+        let summary = if hidden > 0 {
+            format!(
+                "{n} selected · {} ({hidden} not shown by the current filter)",
+                format_bytes(bytes)
+            )
+        } else {
+            format!("{n} selected · {}", format_bytes(bytes))
+        };
         let busy = self.is_busy();
         let mut open = false;
-        let (select_safe, deselect) = widgets::action_bar(
-            ui,
-            &format!("{n} selected · {}", format_bytes(bytes)),
-            |ui| {
-                let label = format!("Remove {n} selected…");
-                open = ui
-                    .add_enabled(n > 0 && !busy, crate::theme::primary_button(ui, &label))
-                    .clicked();
-            },
-        );
+        let (select_safe, deselect) = widgets::action_bar(ui, &summary, |ui| {
+            let label = format!("Remove {n} selected…");
+            open = ui
+                .add_enabled(n > 0 && !busy, crate::theme::primary_button(ui, &label))
+                .clicked();
+        });
         if select_safe {
             for (i, s) in report.items.iter().zip(self.selected.iter_mut()) {
                 if i.class == SafetyClass::Safe {
@@ -587,8 +665,9 @@ impl DockerPage {
             );
             ui.label(
                 RichText::new(format!(
-                    "About {} will be freed. Docker items do not go to the Trash: this cannot be undone. Docker itself refuses anything still in use.",
-                    format_bytes(plan.total_size())
+                    "About {} will be freed. Docker items do not go to the {}: this cannot be undone. Docker itself refuses anything still in use.",
+                    format_bytes(plan.total_size()),
+                    widgets::trash_name()
                 ))
                 .color(Color32::from_rgb(220, 60, 60)),
             );
@@ -690,6 +769,7 @@ impl DockerPage {
         };
         let total = approved.items().len();
         let home = self.home.clone();
+        self.error = None;
         match Job::spawn("docker-clean", ctx.clone(), move |progress| {
             let log = open_operation_log(&home);
             execute(&ep, &approved, progress, log.as_ref()).map_err(|e| e.to_string())
@@ -701,8 +781,9 @@ impl DockerPage {
 
     fn result_dialog(&mut self, ctx: &egui::Context) {
         let Some(r) = &self.result else { return };
+        let width = (ctx.content_rect().width() - 48.0).clamp(300.0, 680.0);
         let modal = Modal::new(Id::new("docker_result")).show(ctx, |ui| {
-            ui.set_width(680.0);
+            ui.set_width(width);
             let removed = r.count(|o| matches!(o, DockerOutcome::Removed { .. }));
             let would = r.count(|o| matches!(o, DockerOutcome::WouldRemove));
             let skipped = r.count(|o| matches!(o, DockerOutcome::Skipped(_)));
@@ -750,5 +831,77 @@ impl DockerPage {
         if modal.inner || modal.should_close() {
             self.result = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustclean_containers::DockerItem;
+
+    fn item(kind: ItemKind, id: &str, class: SafetyClass) -> DockerItem {
+        DockerItem {
+            kind,
+            id: id.into(),
+            name: id.into(),
+            detail: String::new(),
+            size: 10,
+            class,
+            reason: None,
+        }
+    }
+
+    fn ep(name: &str) -> Endpoint {
+        Endpoint {
+            name: name.into(),
+            socket: PathBuf::from(format!("/tmp/{name}.sock")),
+        }
+    }
+
+    fn report(items: Vec<DockerItem>) -> DockerReport {
+        DockerReport {
+            endpoint: ep("a"),
+            server_version: None,
+            items,
+            totals: Default::default(),
+        }
+    }
+
+    fn page() -> DockerPage {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut p = DockerPage::new(tmp.path().to_path_buf());
+        p.endpoints = vec![ep("a"), ep("b")];
+        p
+    }
+
+    #[test]
+    fn selection_survives_a_rescan_but_not_a_class_change() {
+        let mut p = page();
+        p.apply_report(report(vec![
+            item(ItemKind::Image, "i1", SafetyClass::Safe),
+            item(ItemKind::Image, "i2", SafetyClass::Safe),
+            item(ItemKind::Container, "c1", SafetyClass::Review),
+        ]));
+        p.selected = vec![true, true, true];
+        // After a removal: i1 gone, i2 now in use, c1 unchanged, new item.
+        p.apply_report(report(vec![
+            item(ItemKind::Image, "new", SafetyClass::Safe),
+            item(ItemKind::Image, "i2", SafetyClass::Protected),
+            item(ItemKind::Container, "c1", SafetyClass::Review),
+        ]));
+        assert_eq!(p.selected, vec![false, false, true]);
+    }
+
+    #[test]
+    fn engine_is_remembered_by_socket_not_position() {
+        let mut p = page();
+        p.endpoint_socket = Some(ep("b").socket);
+        assert_eq!(p.endpoint_index(), 1);
+        // Another engine appears in front: still "b".
+        p.endpoints.insert(0, ep("c"));
+        assert_eq!(p.endpoint_index(), 2);
+        // "b" stops: fall back to the first, never out of range.
+        p.endpoints.retain(|e| e.name != "b");
+        assert_eq!(p.endpoint_index(), 0);
     }
 }
