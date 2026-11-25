@@ -5,7 +5,7 @@ Safety first: scanning never deletes, every removal is confirmed, re-validated
 and reversible (Trash or quarantine), and RustClean makes no network
 connections.
 
-## Status — v0.1.0
+## Status — v0.1.1
 
 | Module | What it cleans | Removal |
 |---|---|---|

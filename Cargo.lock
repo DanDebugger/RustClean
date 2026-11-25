@@ -3254,7 +3254,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "eframe",
@@ -3282,7 +3282,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean-apps"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "plist",
  "rustclean-core",
@@ -3293,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean-browser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rustclean-core",
  "rustclean-safety",
@@ -3305,7 +3305,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean-containers"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bollard",
  "rustclean-core",
@@ -3318,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rayon",
  "rustclean-safety",
@@ -3332,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean-duplicates"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "rayon",
@@ -3344,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean-junk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "plist",
@@ -3358,7 +3358,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean-safety"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde",
@@ -3372,7 +3372,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean-security"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "plist",
  "rustclean-safety",
@@ -3382,7 +3382,7 @@ dependencies = [
 
 [[package]]
 name = "rustclean-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rayon",
  "rustclean-core",
